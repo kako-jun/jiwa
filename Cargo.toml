@@ -1,0 +1,22 @@
+[package]
+name = "jiwa"
+version = "0.1.0"
+edition = "2021"
+authors = ["kako-jun"]
+description = "Terminal text reveal animations — typewriter + per-grapheme fade-in + pulse. Renderer-agnostic: returns plain RGB so the caller maps to crossterm, ratatui, or its own ANSI writer."
+license = "MIT"
+homepage = "https://github.com/kako-jun/jiwa"
+repository = "https://github.com/kako-jun/jiwa"
+documentation = "https://docs.rs/jiwa"
+readme = "README.md"
+keywords = ["tui", "terminal", "animation", "typewriter", "fade"]
+categories = ["command-line-interface", "rendering"]
+exclude = [".github/", "target/"]
+rust-version = "1.78.0"
+
+[dependencies]
+unicode-segmentation = "1.11"
+
+[profile.release]
+lto = true
+codegen-units = 1

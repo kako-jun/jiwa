@@ -1,1 +1,117 @@
 # jiwa
+
+[![crates.io](https://img.shields.io/crates/v/jiwa.svg)](https://crates.io/crates/jiwa)
+[![docs.rs](https://img.shields.io/docsrs/jiwa)](https://docs.rs/jiwa)
+[![CI](https://github.com/kako-jun/jiwa/actions/workflows/ci.yml/badge.svg)](https://github.com/kako-jun/jiwa/actions/workflows/ci.yml)
+
+Terminal text **reveal** animations for Rust. Two small primitives:
+
+- **Typewriter + per-grapheme fade-in** — characters appear one at a
+  time and bloom from one color into another.
+- **Pulse** — a single symbol "breathes" between two colors on a
+  sinusoidal cycle, useful as a "now playing" / "thinking" indicator.
+
+Both primitives are **renderer-agnostic**: they return plain `Rgb(u8, u8, u8)`
+triples plus the text to draw, and you map those to whatever your
+renderer already uses (`crossterm`, `ratatui`, raw ANSI, etc.). They are
+also **pure** — every time-bearing call takes an explicit
+`std::time::Instant`, so there is no global clock, no spawned thread,
+and tests can advance time without sleeping.
+
+The name is from the Japanese onomatopoeia **「じわじわ」** — something
+appearing slowly, blooming into view.
+
+## Install
+
+```toml
+[dependencies]
+jiwa = "0.1"
+```
+
+## Example: typewriter reveal
+
+```rust
+use std::time::{Duration, Instant};
+use jiwa::{RevealHandle, RevealOpts};
+
+let start = Instant::now();
+let reveal = RevealHandle::start_at("Hello, 世界", RevealOpts::default(), start);
+
+// Tick once per redraw — your event loop chooses the cadence.
+let frame = reveal.snapshot(start + Duration::from_millis(100));
+for g in &frame {
+    // g.text:    the grapheme cluster to draw
+    // g.color:   Rgb(u8, u8, u8) to draw it in
+    // g.progress: 0.0 (just appeared) .. 1.0 (fade complete)
+    print!("{}", g.text);
+}
+```
+
+The default preset (`RevealOpts::soft_green`) is tuned for problem /
+quiz text on a dark terminal — 45 ms typewriter step, 320 ms fade from
+a deep gray to a soft green so the in-between color reads as an
+afterimage rather than a blink.
+
+You can also disable either dimension by zeroing it:
+
+- `char_interval = 0` → whole block fades in together (no typewriter).
+- `fade_duration = 0` → pure typewriter, each grapheme appears at its
+  final color.
+
+## Example: pulse
+
+```rust
+use jiwa::{PulseHandle, PulseOpts};
+
+let pulse = PulseHandle::start("♪", PulseOpts::default());
+let frame = pulse.snapshot(std::time::Instant::now());
+// frame.text == "♪"
+// frame.color cycles between PulseOpts::color_dim and color_bright.
+```
+
+The default preset (`PulseOpts::cyan_breath`) gives a ~1.5 s breath
+cycle from a muted teal to a bright cyan, designed for the "♪ audio
+playing" affordance.
+
+## Mapping to your renderer
+
+`jiwa::Rgb` is intentionally not a wrapper around `crossterm::style::Color`
+or `ratatui::style::Color`. Map at the call site:
+
+```rust
+// ratatui
+let color = ratatui::style::Color::Rgb(g.color.0, g.color.1, g.color.2);
+
+// crossterm
+let color = crossterm::style::Color::Rgb { r: g.color.0, g: g.color.1, b: g.color.2 };
+```
+
+## Concurrency note
+
+These primitives are pure functions of `(time, text, opts)`. They do
+not own a thread, do not poll for input, and do not sleep. Anything
+your reveal-in-progress UI needs to do concurrently (accept input
+during the reveal, abort early, restart) is the responsibility of the
+surrounding event loop — `jiwa` just answers "what does the frame look
+like right now?".
+
+## Status
+
+- **v0.1.0** — library primitives extracted from
+  [type-globe](https://github.com/kako-jun/type-globe)'s in-tree
+  `jiwa_core` module (where they have been used in production since
+  v0.6.0).
+- **Planned**: a `jiwa` CLI binary so the same reveal/pulse engine is
+  usable from shell pipes (`echo "Hello" | jiwa --fade 200ms`).
+  Tracked in the repo issues.
+
+## Inspiration
+
+The CLI direction takes cues from
+[TerminalTextEffects](https://github.com/ChrisBuilds/terminaltexteffects)
+(Python). `jiwa` is intentionally narrower — reveal-shaped effects
+only, Unix-pipe friendly, Rust single binary.
+
+## License
+
+MIT
