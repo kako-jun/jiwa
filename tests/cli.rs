@@ -19,13 +19,18 @@ fn run(args: &[&str], stdin: &[u8]) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn jiwa");
-    child
-        .stdin
-        .take()
-        .expect("child stdin")
-        .write_all(stdin)
-        .expect("write stdin");
-    // stdin dropped here -> EOF for the child.
+    {
+        let mut child_stdin = child.stdin.take().expect("child stdin");
+        // A child that rejects its arguments (exit 2) can close stdin before
+        // we finish writing, yielding a BrokenPipe; that is expected for the
+        // parse-error tests, so tolerate it rather than panicking.
+        match child_stdin.write_all(stdin) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+            Err(e) => panic!("write stdin: {e:?}"),
+        }
+        // child_stdin dropped here -> EOF for the child.
+    }
     child.wait_with_output().expect("wait for jiwa")
 }
 
@@ -176,6 +181,16 @@ fn pipe_into_pipe_stays_clean() {
     assert_no_ansi_noise(&out.stdout);
     assert_eq!(out.stdout, b"streamed\n");
 }
+
+// --- Reader mode (`--read`) ---
+//
+// PTY gap: these integration tests only exercise the non-TTY pass-through
+// path and the parse-error path. `cargo test` always gives the child a pipe
+// for stdout (never a TTY), so the interactive loop in `run_reader` —
+// sending Enter, erasing the prompt, the q/EOF/error early-exit branches,
+// and the `TermGuard` restore — is never reached here. That loop needs a
+// `/dev/tty` + PTY harness and is verified manually (see PR #8); the
+// `erase_prompt` byte sequences are unit-tested in `main.rs`.
 
 #[test]
 fn read_mode_non_tty_passes_through() {
