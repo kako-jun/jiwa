@@ -426,4 +426,60 @@ mod tests {
         // Best-effort: a nonexistent file yields None, never a panic.
         assert!(load("/nonexistent/jiwa-test-sound.wav").is_none());
     }
+
+    #[test]
+    fn guess_extension_edge_cases() {
+        // Trailing dot -> empty extension -> None.
+        assert_eq!(guess_extension("a."), None);
+        // Dotfile whose only "extension" is the whole tail (`bashrc`, len 6)
+        // exceeds the 5-char cap -> None.
+        assert_eq!(guess_extension(".bashrc"), None);
+        // A leading-dot name with a short tail is still extracted.
+        assert_eq!(guess_extension(".wav").as_deref(), Some("wav"));
+        // Multi-dot: only the final segment is the extension.
+        assert_eq!(guess_extension("a.tar.gz").as_deref(), Some("gz"));
+        // Windows-style backslash path, case-folded.
+        assert_eq!(guess_extension("C:\\x\\y.WAV").as_deref(), Some("wav"));
+        // Empty / bare-dot sources have no extension.
+        assert_eq!(guess_extension(""), None);
+        assert_eq!(guess_extension("."), None);
+        // Digits are alphanumeric, so a numeric extension is accepted.
+        assert_eq!(guess_extension("a.123").as_deref(), Some("123"));
+        // Length boundary: 5 chars OK, 6 chars rejected.
+        assert_eq!(guess_extension("a.fffff").as_deref(), Some("fffff"));
+        assert_eq!(guess_extension("a.ffffff"), None);
+    }
+
+    #[test]
+    fn hash_hex_handles_empty_string() {
+        // The empty string hashes to a deterministic 16-digit lowercase hex.
+        let a = hash_hex("");
+        assert_eq!(a, hash_hex(""), "deterministic for the empty string");
+        assert_eq!(a.len(), 16);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn is_url_is_case_sensitive() {
+        // The scheme match is byte-exact lowercase: uppercase schemes are not
+        // recognized as URLs (current fixed behavior).
+        assert!(!is_url("HTTP://x"));
+        assert!(!is_url("HTTPS://x"));
+    }
+
+    #[test]
+    fn load_empty_local_file_is_none() {
+        // A zero-byte local file is treated as "nothing to play" -> None.
+        // Use a unique temp name (no env mutation, so parallel tests stay
+        // safe) and clean it up afterwards.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("jiwa-empty-{}-{}.wav", std::process::id(), n));
+        std::fs::write(&path, b"").expect("create empty temp file");
+        let got = load(path.to_str().unwrap());
+        let _ = std::fs::remove_file(&path);
+        assert!(got.is_none(), "empty local file must load as None");
+    }
 }

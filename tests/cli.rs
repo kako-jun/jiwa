@@ -236,3 +236,63 @@ fn read_mode_empty_stdin() {
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(out.stdout, b"\n");
 }
+
+// --- `--sound` (Issue #7) ---
+//
+// Over a non-TTY pipe the reveal never animates, so the sound is never
+// loaded (no file/network I/O, no player spawn): we assert the passthrough
+// stays byte-clean and quiet. Real playback, downloads, and player
+// detection are environment-dependent and intentionally not auto-tested.
+
+#[test]
+fn sound_missing_path_passthrough_clean() {
+    // A nonexistent sound path is irrelevant on the non-TTY path: passthrough
+    // never reaches `sound::load`, so there is no I/O and no stderr note.
+    let out = run(&["--sound", "/nonexistent.wav"], b"hello");
+    assert_eq!(out.status.code(), Some(0));
+    assert_no_ansi_noise(&out.stdout);
+    assert_eq!(out.stdout, b"hello\n");
+    assert!(out.stderr.is_empty(), "passthrough must not load the sound");
+}
+
+#[test]
+fn sound_url_value_passthrough_clean() {
+    // A URL sound value likewise triggers no download on the passthrough path.
+    let out = run(&["--sound=https://x.test/blip.wav"], b"hello");
+    assert_eq!(out.status.code(), Some(0));
+    assert_no_ansi_noise(&out.stdout);
+    assert_eq!(out.stdout, b"hello\n");
+    assert!(out.stderr.is_empty(), "passthrough must not fetch the URL");
+}
+
+#[test]
+fn sound_missing_value_exits_two() {
+    // `--sound` is value-taking; a trailing flag with no value errors.
+    let out = run(&["--sound"], b"");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(!out.stderr.is_empty(), "expected an error message");
+}
+
+#[test]
+fn sound_empty_value_exits_two() {
+    // An empty value is rejected at parse time (both the `=` and the
+    // separate-argument forms).
+    let eq = run(&["--sound="], b"");
+    assert_eq!(eq.status.code(), Some(2));
+    assert!(!eq.stderr.is_empty(), "expected an error message");
+
+    let sep = run(&["--sound", ""], b"");
+    assert_eq!(sep.status.code(), Some(2));
+    assert!(!sep.stderr.is_empty(), "expected an error message");
+}
+
+#[test]
+fn read_with_sound_passthrough_clean() {
+    // Reader mode + `--sound` over a non-TTY pipe stays verbatim and quiet:
+    // no prompt, no cursor noise, no sound load.
+    let out = run(&["--read", "--sound", "/nonexistent.wav"], b"hello");
+    assert_eq!(out.status.code(), Some(0));
+    assert_no_ansi_noise(&out.stdout);
+    assert_eq!(out.stdout, b"hello\n");
+    assert!(out.stderr.is_empty(), "passthrough must not load the sound");
+}
