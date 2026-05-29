@@ -73,6 +73,29 @@ The default preset (`PulseOpts::cyan_breath`) gives a ~1.5 s breath
 cycle from a muted teal to a bright cyan, designed for the "♪ audio
 playing" affordance.
 
+## CLI
+
+`jiwa` also ships a tiny dependency-free binary so the same reveal engine
+works from a shell pipe:
+
+```sh
+# whole block fades in
+echo "Hello" | jiwa --fade 200ms
+
+# typewriter
+echo "Hello" | jiwa --stagger 50ms
+
+# both, with custom colors
+echo "Hello" | jiwa --fade 200ms --stagger 50ms --from "#444" --to "#fff"
+
+# pass-through: existing ANSI color is preserved, reveal is timing only
+cat story.txt | lolcat | jiwa --stagger 30ms
+```
+
+When stdout is not a terminal (or no animation flag is given) the input is
+passed through verbatim, so `jiwa ... | other` and `jiwa ... > file` stay
+free of cursor-control noise. Run `jiwa --help` for the full flag list.
+
 ## Mapping to your renderer
 
 `jiwa::Rgb` is intentionally not a wrapper around `crossterm::style::Color`
@@ -101,9 +124,9 @@ like right now?".
   [type-globe](https://github.com/kako-jun/type-globe)'s in-tree
   `jiwa_core` module (where they have been used in production since
   v0.6.0).
-- **Planned**: a `jiwa` CLI binary so the same reveal/pulse engine is
-  usable from shell pipes (`echo "Hello" | jiwa --fade 200ms`).
-  Tracked in the repo issues.
+- **CLI binary** — `jiwa` reads stdin and reveals it on stdout
+  (`echo "Hello" | jiwa --fade 200ms`). Dependency-free, pipe-safe. See
+  the [CLI](#cli) section above.
 
 ## Inspiration
 
