@@ -157,6 +157,12 @@ fn final_render_sequence(prev_rows: usize, final_frame: &str) -> Vec<u8> {
 /// Escape-only / empty input (no printable graphemes) is emitted verbatim
 /// with a trailing newline, the same content the passthrough path would
 /// produce, just written through the already-open handle.
+///
+/// Note: an escape-only segment is emitted verbatim through the already-open
+/// handle (inside the guard's terminal setup) — i.e. between [`ENTER`] and
+/// [`RESTORE`]. This differs from the old `animate_reveal`, which short-
+/// circuited to passthrough *before* [`ENTER`]. The difference is harmless:
+/// the escapes are balanced and the terminal is restored on guard drop.
 fn reveal_segment<W: Write>(out: &mut W, input: &str, opts: &CliOpts) {
     let tokens = tokenize(input);
     let plain = plain_text(&tokens);
@@ -261,31 +267,47 @@ fn run_reader(input: &str, opts: &CliOpts, tty: File) {
 
         let mut line = String::new();
         match keys.read_line(&mut line) {
-            // EOF (Ctrl-D): end the session.
+            // EOF (Ctrl-D): end the session. No newline was echoed (the read
+            // returned 0 bytes), so do not step the cursor up.
             Ok(0) => {
-                erase_prompt(&mut out);
+                erase_prompt(&mut out, false);
                 break;
             }
             Ok(_) => {
+                // A line that reached us with its trailing `\n` means the
+                // terminal echoed that newline (cooked mode), dropping the
+                // cursor one row below the prompt; tell `erase_prompt` so it
+                // steps back up before clearing. A line without `\n` (e.g.
+                // `q` then Ctrl-D) was not newline-echoed.
+                let echoed = line.ends_with('\n');
                 // Erase the prompt line so scrollback keeps only the text.
-                erase_prompt(&mut out);
+                erase_prompt(&mut out, echoed);
+                // Only an exact `q` (after trim) quits; other input advances.
                 if line.trim() == "q" {
                     break;
                 }
             }
-            // Read error: stop cleanly rather than spinning.
+            // Read error: stop cleanly rather than spinning. Nothing was
+            // echoed in this case either.
             Err(_) => {
-                erase_prompt(&mut out);
+                erase_prompt(&mut out, false);
                 break;
             }
         }
     }
 }
 
-/// Erase the current line (the reader prompt) and return the cursor to
-/// column 0, leaving the cursor on the line the next segment will use.
-fn erase_prompt<W: Write>(out: &mut W) {
-    let _ = out.write_all(b"\r\x1b[K");
+/// Erase the reader prompt. In cooked mode (no raw mode — jiwa is
+/// dependency-free) pressing Enter makes the terminal echo a newline,
+/// dropping the cursor one row below the prompt; when that happened
+/// (`echoed_newline`) we step back up first. Then clear from the cursor
+/// downward so the prompt line (and the blank line the echo produced) are
+/// both removed, leaving scrollback with only the novel text.
+fn erase_prompt<W: Write>(out: &mut W, echoed_newline: bool) {
+    if echoed_newline {
+        let _ = out.write_all(b"\x1b[1A");
+    }
+    let _ = out.write_all(b"\r\x1b[J");
     let _ = out.flush();
 }
 
@@ -325,6 +347,25 @@ mod tests {
         let seq = final_render_sequence(2, "X");
         assert_eq!(seq, b"\x1b[2A\r\x1b[J\x1b[?7hX\n".to_vec());
         assert_eq!(seq.last(), Some(&b'\n'), "must end with a trailing newline");
+    }
+
+    #[test]
+    fn erase_prompt_steps_up_when_newline_echoed() {
+        // Cooked-mode Enter echoes a newline (cursor drops one row): step the
+        // cursor up first, then clear from the cursor downward so both the
+        // prompt line and the echo's blank line are removed.
+        let mut buf = Vec::new();
+        erase_prompt(&mut buf, true);
+        assert_eq!(buf, b"\x1b[1A\r\x1b[J".to_vec());
+    }
+
+    #[test]
+    fn erase_prompt_no_step_up_without_echo() {
+        // EOF / read-error / no-newline input did not echo a newline, so the
+        // cursor is still on the prompt line: clear in place, no cursor-up.
+        let mut buf = Vec::new();
+        erase_prompt(&mut buf, false);
+        assert_eq!(buf, b"\r\x1b[J".to_vec());
     }
 
     #[test]
