@@ -24,6 +24,10 @@ pub struct CliOpts {
     pub read: bool,
     /// Segment unit used by reader mode.
     pub by: Unit,
+    /// Optional sound source (local path or `http(s)` URL) played
+    /// best-effort each time a reveal frame brings new non-whitespace
+    /// graphemes into view. `None` means silent reveal.
+    pub sound: Option<String>,
 }
 
 impl Default for CliOpts {
@@ -36,6 +40,7 @@ impl Default for CliOpts {
             fps: 60,
             read: false,
             by: Unit::Sentence,
+            sound: None,
         }
     }
 }
@@ -76,6 +81,13 @@ OPTIONS:
                       through verbatim.
     --by <UNIT>       Reader segment unit: sentence (default) / paragraph /
                       line. Only meaningful with --read.
+    --sound <SRC>     Play a sound (best-effort) each time new non-blank
+                      text appears. SRC is a local file PATH or an http(s)
+                      URL (fetched once via curl/wget into a temp cache).
+                      WAV is recommended. Playback shells out to an OS
+                      player (ffplay/mpv/aplay/pw-cat, or macOS afplay);
+                      where none exists the reveal is simply silent. Works
+                      in reader mode (--read) too.
     -h, --help        Print this help and exit.
     -V, --version     Print version and exit.
 
@@ -182,6 +194,10 @@ where
             "--by" => {
                 let v = take_value(flag, &mut inline, &mut iter)?;
                 opts.by = parse_unit(&v).map_err(|e| flag_err("--by", &v, &e))?;
+            }
+            "--sound" => {
+                let v = take_value(flag, &mut inline, &mut iter)?;
+                opts.sound = Some(v);
             }
             _ => {
                 return Err(format!(
@@ -601,6 +617,30 @@ mod tests {
         };
         assert!(opts.read);
         assert_eq!(opts.by, Unit::Line);
+    }
+
+    #[test]
+    fn parse_args_sound_flag() {
+        // `--sound` takes a value; default is None.
+        let Action::Run(opts) = parse_args(["--sound", "/tmp/clack.wav"]).unwrap() else {
+            panic!("expected Run");
+        };
+        assert_eq!(opts.sound.as_deref(), Some("/tmp/clack.wav"));
+
+        // `=`-joined form and URL value work too.
+        let Action::Run(opts) = parse_args(["--sound=https://x.test/blip.wav"]).unwrap() else {
+            panic!("expected Run");
+        };
+        assert_eq!(opts.sound.as_deref(), Some("https://x.test/blip.wav"));
+
+        // Default is None.
+        let Action::Run(opts) = parse_args::<[&str; 0], &str>([]).unwrap() else {
+            panic!("expected Run");
+        };
+        assert_eq!(opts.sound, None, "sound defaults to None");
+
+        // A missing value errors.
+        assert!(parse_args(["--sound"]).is_err());
     }
 
     #[test]
