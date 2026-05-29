@@ -117,8 +117,14 @@ where
         };
 
         match flag {
-            "-h" | "--help" => return Ok(Action::Help),
-            "-V" | "--version" => return Ok(Action::Version),
+            "-h" | "--help" => {
+                reject_inline(flag, &inline)?;
+                return Ok(Action::Help);
+            }
+            "-V" | "--version" => {
+                reject_inline(flag, &inline)?;
+                return Ok(Action::Version);
+            }
             "--fade" => {
                 let v = take_value(flag, &mut inline, &mut iter)?;
                 opts.fade = parse_duration(&v).map_err(|e| flag_err("--fade", &v, &e))?;
@@ -180,6 +186,18 @@ where
 
 fn flag_err(flag: &str, value: &str, why: &str) -> String {
     format!("jiwa: invalid value `{value}` for `{flag}`: {why}\nTry `jiwa --help`.")
+}
+
+/// Reject an inline `--flag=value` value on a flag that takes no value
+/// (`--help`, `--version`). Without this, `--help=foo` would silently
+/// discard the stray `=foo`.
+fn reject_inline(flag: &str, inline: &Option<String>) -> Result<(), String> {
+    match inline {
+        Some(v) => Err(format!(
+            "jiwa: `{flag}` takes no value (got `={v}`)\nTry `jiwa --help`."
+        )),
+        None => Ok(()),
+    }
 }
 
 /// Parse a duration string.
@@ -450,6 +468,17 @@ mod tests {
         // Only the first `=` splits flag from value; later `=` stay in the
         // value (colors/durations never contain `=`, but the rule is total).
         assert!(parse_args(["--fps=1=2"]).is_err());
+    }
+
+    #[test]
+    fn parse_args_value_less_flag_rejects_inline_value() {
+        // `--help`/`--version` take no value; a stray `=foo` must not be
+        // silently discarded.
+        assert!(parse_args(["--help=foo"]).is_err());
+        assert!(parse_args(["--version=1"]).is_err());
+        // The bare forms still work.
+        assert_eq!(parse_args(["--help"]).unwrap(), Action::Help);
+        assert_eq!(parse_args(["--version"]).unwrap(), Action::Version);
     }
 
     #[test]
