@@ -265,4 +265,105 @@ mod tests {
         assert_eq!(visible_newline_rows(&t.tokens, 5), 2);
         assert_eq!(visible_newline_rows(&t.tokens, 1), 0);
     }
+
+    #[test]
+    fn tokenize_incomplete_escape_not_dropped() {
+        // `\x1b[31` ends without a CSI final byte. It must be kept as text
+        // (not silently dropped) and must not panic.
+        let t = tokenize("\x1b[31");
+        // No well-formed escape -> input was not treated as colored.
+        assert!(!t.has_input_color);
+        // Every input byte survives into the plain text.
+        assert_eq!(plain_text(&t), "\x1b[31");
+    }
+
+    #[test]
+    fn tokenize_lone_esc_byte() {
+        // A bare ESC, and an ESC sandwiched between letters, are kept verbatim.
+        assert_eq!(plain_text(&tokenize("\x1b")), "\x1b");
+        assert_eq!(plain_text(&tokenize("a\x1bb")), "a\x1bb");
+    }
+
+    #[test]
+    fn tokenize_consecutive_escapes() {
+        // Two back-to-back CSI sequences then one grapheme.
+        let t = tokenize("\x1b[1m\x1b[31mA");
+        assert_eq!(
+            t.tokens,
+            vec![
+                Token::Escape("\x1b[1m".into()),
+                Token::Escape("\x1b[31m".into()),
+                Token::Grapheme("A".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenize_zwj_emoji_single_grapheme() {
+        // A ZWJ family emoji is one grapheme cluster, not its components.
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        let t = tokenize(family);
+        assert_eq!(t.tokens, vec![Token::Grapheme(family.into())]);
+    }
+
+    #[test]
+    fn tokenize_empty_input() {
+        let t = tokenize("");
+        assert!(t.tokens.is_empty());
+        assert!(!t.has_input_color);
+        assert_eq!(plain_text(&t), "");
+    }
+
+    #[test]
+    fn render_frame_drops_trailing_escape_after_last_visible() {
+        // `A <esc> B` with only A visible: the escape after the last visible
+        // grapheme is suppressed (no following visible grapheme).
+        let t = tokenize("A\x1b[0mB");
+        let frame = render_frame(&t.tokens, 1, &[Rgb(1, 2, 3)], false);
+        assert_eq!(frame, "\x1b[38;2;1;2;3mA\x1b[0m");
+    }
+
+    #[test]
+    fn render_frame_emits_escape_before_following_visible() {
+        // A leading escape is emitted because a visible grapheme follows it.
+        let t = tokenize("\x1b[31mAB");
+        let frame = render_frame(&t.tokens, 2, &[], true);
+        assert_eq!(frame, "\x1b[31mAB\x1b[0m");
+    }
+
+    #[test]
+    fn render_frame_colors_shorter_than_visible_no_panic() {
+        // Fewer colors than visible graphemes: missing entries simply emit
+        // no foreground (no out-of-bounds panic).
+        let t = tokenize("ab");
+        let frame = render_frame(&t.tokens, 2, &[], false);
+        assert_eq!(frame, "ab\x1b[0m");
+    }
+
+    #[test]
+    fn render_frame_has_input_color_suppresses_jiwa_fg() {
+        // With input color present, jiwa never injects its own `38;2` fg,
+        // even given a colors slice and multiple visible graphemes.
+        let t = tokenize("\x1b[31mABC");
+        let colors = [Rgb(10, 20, 30); 3];
+        let frame = render_frame(&t.tokens, 3, &colors, true);
+        assert!(!frame.contains("38;2"));
+        assert_eq!(frame, "\x1b[31mABC\x1b[0m");
+    }
+
+    #[test]
+    fn visible_newline_rows_zero_and_all() {
+        // Zero visible -> zero rows; consecutive and trailing newlines count.
+        let t = tokenize("\n\na");
+        assert_eq!(visible_newline_rows(&t.tokens, 0), 0);
+        assert_eq!(visible_newline_rows(&t.tokens, 2), 2);
+        assert_eq!(visible_newline_rows(&t.tokens, 3), 2);
+    }
+
+    #[test]
+    fn plain_text_excludes_all_escapes_multi() {
+        // Escapes interleaved with multibyte graphemes vanish from plain text.
+        let t = tokenize("\x1b[31m世\x1b[0m界");
+        assert_eq!(plain_text(&t), "世界");
+    }
 }

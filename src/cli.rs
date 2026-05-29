@@ -304,4 +304,90 @@ mod tests {
         assert!(parse_args(["--fade"]).is_err());
         assert!(parse_args(["--fade", "bad"]).is_err());
     }
+
+    #[test]
+    fn parse_duration_leading_dot() {
+        // A bare-leading-dot decimal with a `s` suffix: `.5s` == 500ms.
+        assert_eq!(parse_duration(".5s").unwrap(), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn parse_duration_surrounding_whitespace() {
+        // Outer whitespace is trimmed; a bare number is milliseconds.
+        assert_eq!(parse_duration(" 50 ").unwrap(), Duration::from_millis(50));
+    }
+
+    #[test]
+    fn parse_duration_rejects_multiple_dots() {
+        assert!(parse_duration("1.2.3").is_err());
+    }
+
+    #[test]
+    fn parse_duration_rejects_non_finite() {
+        // `inf`/`nan` parse as f64 but must be rejected as non-finite.
+        assert!(parse_duration("inf").is_err());
+        assert!(parse_duration("nan").is_err());
+        assert!(parse_duration("NaN").is_err());
+    }
+
+    #[test]
+    fn parse_duration_seconds_decimal_zero() {
+        // Zero in either unit collapses to the zero duration.
+        assert_eq!(parse_duration("0s").unwrap(), Duration::ZERO);
+        assert_eq!(parse_duration("0ms").unwrap(), Duration::ZERO);
+    }
+
+    #[test]
+    fn parse_color_case_insensitive() {
+        // Hex letters are case-insensitive in both 6- and 3-digit forms.
+        assert_eq!(
+            parse_color("#FF00AA").unwrap(),
+            parse_color("#ff00aa").unwrap()
+        );
+        assert_eq!(parse_color("#Ff0").unwrap(), Rgb(255, 255, 0));
+    }
+
+    #[test]
+    fn parse_color_three_digit_extremes() {
+        assert_eq!(parse_color("#000").unwrap(), Rgb(0, 0, 0));
+        assert_eq!(parse_color("#fff").unwrap(), Rgb(255, 255, 255));
+    }
+
+    #[test]
+    fn parse_color_rejects_4_and_5_digits() {
+        // Only 3- or 6-digit hex is accepted.
+        assert!(parse_color("#1234").is_err());
+        assert!(parse_color("#12345").is_err());
+    }
+
+    #[test]
+    fn parse_color_rejects_bare_hash() {
+        // A lone `#` strips to an empty (0-length) hex body.
+        assert!(parse_color("#").is_err());
+    }
+
+    #[test]
+    fn parse_args_rejects_non_integer_fps() {
+        // `--fps` parses as a u32; decimals and letters are rejected.
+        assert!(parse_args(["--fps", "1.5"]).is_err());
+        assert!(parse_args(["--fps", "abc"]).is_err());
+    }
+
+    #[test]
+    fn parse_args_last_flag_wins() {
+        // Repeated flags overwrite earlier values (last-one-wins).
+        let Action::Run(opts) = parse_args(["--fade", "100ms", "--fade", "200ms"]).unwrap() else {
+            panic!("expected Run");
+        };
+        assert_eq!(opts.fade, Duration::from_millis(200));
+    }
+
+    #[test]
+    fn parse_args_missing_value_for_each_flag() {
+        // A trailing value-taking flag with no following argument errors.
+        assert!(parse_args(["--from"]).is_err());
+        assert!(parse_args(["--to"]).is_err());
+        assert!(parse_args(["--stagger"]).is_err());
+        assert!(parse_args(["--fps"]).is_err());
+    }
 }
