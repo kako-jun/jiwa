@@ -189,8 +189,8 @@ fn pipe_into_pipe_stays_clean() {
 // for stdout (never a TTY), so the interactive loop in `run_reader` —
 // sending Enter, erasing the prompt, the q/EOF/error early-exit branches,
 // and the `TermGuard` restore — is never reached here. That loop needs a
-// `/dev/tty` + PTY harness and is verified manually (see PR #8); the
-// `erase_prompt` byte sequences are unit-tested in `main.rs`.
+// `/dev/tty` + PTY harness and is verified manually; the `erase_prompt`
+// byte sequences are unit-tested in `main.rs`.
 
 #[test]
 fn read_mode_non_tty_passes_through() {
