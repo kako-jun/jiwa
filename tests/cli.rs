@@ -176,3 +176,48 @@ fn pipe_into_pipe_stays_clean() {
     assert_no_ansi_noise(&out.stdout);
     assert_eq!(out.stdout, b"streamed\n");
 }
+
+#[test]
+fn read_mode_non_tty_passes_through() {
+    // Reader mode requires a TTY stdout; over a pipe it falls back to clean
+    // verbatim pass-through (no prompt, no cursor noise).
+    let out = run(&["--read"], b"First sentence. Second sentence.");
+    assert_eq!(out.status.code(), Some(0));
+    assert_no_ansi_noise(&out.stdout);
+    assert_eq!(out.stdout, b"First sentence. Second sentence.\n");
+}
+
+#[test]
+fn read_mode_paragraph_non_tty_passes_through() {
+    // Same pass-through guarantee with an explicit `--by paragraph`.
+    let out = run(&["--read", "--by", "paragraph"], b"Para one.\n\nPara two.");
+    assert_eq!(out.status.code(), Some(0));
+    assert_no_ansi_noise(&out.stdout);
+    assert_eq!(out.stdout, b"Para one.\n\nPara two.\n");
+}
+
+#[test]
+fn read_mode_invalid_unit_exits_two() {
+    // An unknown `--by` unit is rejected at parse time (exit 2), even under
+    // `--read`.
+    let out = run(&["--read", "--by", "word"], b"text");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(!out.stderr.is_empty(), "expected an error message");
+}
+
+#[test]
+fn read_inline_value_rejected() {
+    // `--read` is value-less; an inline `=foo` must be rejected (exit 2).
+    let out = run(&["--read=foo"], b"text");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(!out.stderr.is_empty(), "expected an error message");
+}
+
+#[test]
+fn read_mode_empty_stdin() {
+    // Empty stdin under reader mode still produces clean output: a lone
+    // trailing newline, matching the passthrough contract.
+    let out = run(&["--read"], b"");
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.stdout, b"\n");
+}

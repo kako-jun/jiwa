@@ -283,6 +283,191 @@ mod tests {
         assert_eq!(segment("a\n\nb", Unit::Line), vec!["a", "b"]);
     }
 
+    // --- Sentence: additional edge cases ---
+
+    #[test]
+    fn sentence_mr_period_splits_on_space() {
+        // Current spec: `.` + following space ends the sentence even after
+        // an abbreviation like "Mr." (no abbreviation dictionary).
+        assert_eq!(
+            segment("Mr. Smith went home.", Unit::Sentence),
+            vec!["Mr.", " Smith went home."]
+        );
+    }
+
+    #[test]
+    fn sentence_ellipsis_midword() {
+        assert_eq!(
+            segment("Wait... really.", Unit::Sentence),
+            vec!["Wait...", " really."]
+        );
+    }
+
+    #[test]
+    fn sentence_ellipsis_trailing() {
+        assert_eq!(segment("Wait...", Unit::Sentence), vec!["Wait..."]);
+    }
+
+    #[test]
+    fn sentence_consecutive_japanese_terminators() {
+        // Each Japanese terminator ends a sentence, so a doubled 。 yields a
+        // standalone "。" segment.
+        assert_eq!(
+            segment("本当。。終わり。", Unit::Sentence),
+            vec!["本当。", "。", "終わり。"]
+        );
+    }
+
+    #[test]
+    fn sentence_mixed_bang_question() {
+        assert_eq!(
+            segment("Really?! Yes.", Unit::Sentence),
+            vec!["Really?!", " Yes."]
+        );
+    }
+
+    #[test]
+    fn sentence_leading_dot_decimal_like() {
+        // ".5" has no preceding digit, so the leading dot is not a decimal
+        // separator; the only sentence end is the trailing `.` at EOF.
+        assert_eq!(segment(".5 cents.", Unit::Sentence), vec![".5 cents."]);
+    }
+
+    #[test]
+    fn sentence_digit_then_terminal_dot() {
+        // Preceding digit but EOF after the dot (no following digit) -> the
+        // dot terminates the sentence.
+        assert_eq!(segment("100.", Unit::Sentence), vec!["100."]);
+    }
+
+    #[test]
+    fn sentence_emoji_before_terminator() {
+        // A multi-codepoint grapheme (emoji) right before the `.` is kept in
+        // the sentence; the `.`+space still ends it.
+        assert_eq!(
+            segment("Run🎉. Next.", Unit::Sentence),
+            vec!["Run🎉.", " Next."]
+        );
+    }
+
+    #[test]
+    fn sentence_crlf_normalized_no_cr_residue() {
+        // must-2 regression guard: after CRLF normalization no `\r` survives
+        // in any segment; the boundary is `.` followed by the normalized `\n`.
+        assert_eq!(
+            segment("Line one.\r\nLine two.", Unit::Sentence),
+            vec!["Line one.", "\nLine two."]
+        );
+    }
+
+    #[test]
+    fn sentence_domain_dot_not_split() {
+        // A `.` followed by a non-whitespace char does not end the sentence,
+        // so domains/abbreviations stay intact until a space or EOF.
+        assert_eq!(segment("a.b", Unit::Sentence), vec!["a.b"]);
+        assert_eq!(
+            segment("U.S.A. is here.", Unit::Sentence),
+            vec!["U.S.A.", " is here."]
+        );
+    }
+
+    #[test]
+    fn sentence_closer_at_eof() {
+        // A terminator followed only by closers + EOF stays one segment.
+        assert_eq!(
+            segment("He said \"no.\"", Unit::Sentence),
+            vec!["He said \"no.\""]
+        );
+        assert_eq!(segment("end.)", Unit::Sentence), vec!["end.)"]);
+    }
+
+    #[test]
+    fn sentence_closer_then_space() {
+        // The closer is absorbed, then the following space confirms the end.
+        assert_eq!(segment("Hi.) Bye.", Unit::Sentence), vec!["Hi.)", " Bye."]);
+    }
+
+    #[test]
+    fn sentence_japanese_terminator_then_newline() {
+        // 。 ends the sentence; the interior newline starts the next segment.
+        assert_eq!(segment("a。\nb", Unit::Sentence), vec!["a。", "\nb"]);
+    }
+
+    #[test]
+    fn sentence_combining_grapheme_preserved() {
+        // "é" written as e + combining acute is one grapheme and stays whole.
+        assert_eq!(
+            segment("e\u{0301}nd.", Unit::Sentence),
+            vec!["e\u{0301}nd."]
+        );
+    }
+
+    #[test]
+    fn sentence_single_terminator_only() {
+        assert_eq!(segment("。", Unit::Sentence), vec!["。"]);
+    }
+
+    #[test]
+    fn sentence_unclosed_opener() {
+        // A leading opener without a matching closer does not interfere; the
+        // sentence still ends at 。 (EOF).
+        assert_eq!(segment("「終わり。", Unit::Sentence), vec!["「終わり。"]);
+    }
+
+    // --- Paragraph / Line: additional edge cases ---
+
+    #[test]
+    fn paragraph_preserves_interior_single_newline() {
+        assert_eq!(
+            segment("A\nB\n\nC\nD", Unit::Paragraph),
+            vec!["A\nB", "C\nD"]
+        );
+    }
+
+    #[test]
+    fn paragraph_leading_blank_lines_dropped() {
+        assert_eq!(segment("\n\nA", Unit::Paragraph), vec!["A"]);
+    }
+
+    #[test]
+    fn paragraph_whitespace_only_line_between() {
+        // Measured: a line containing only spaces ("  ") is non-newline
+        // content that resets the newline run, so the two halves stay joined
+        // into a single paragraph (interior whitespace preserved).
+        assert_eq!(segment("A\n  \nB", Unit::Paragraph), vec!["A\n  \nB"]);
+    }
+
+    #[test]
+    fn paragraph_crlf_blank_line_splits() {
+        // must-1 regression guard: a CRLF blank line must split paragraphs.
+        assert_eq!(segment("a\r\n\r\nb", Unit::Paragraph), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn line_last_line_without_newline() {
+        assert_eq!(segment("a\nb", Unit::Line), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn line_crlf_normalized() {
+        // After CRLF normalization the trailing blank line is dropped and no
+        // `\r` survives in the segments.
+        assert_eq!(segment("a\r\nb\r\n\r\n", Unit::Line), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn line_all_blank_inputs() {
+        assert!(segment("", Unit::Line).is_empty());
+        assert!(segment("\n", Unit::Line).is_empty());
+    }
+
+    #[test]
+    fn reader_prompt_index_equals_total_and_arrow() {
+        let p = reader_prompt(1, 1);
+        assert!(p.contains("1/1"), "shows index/total when equal");
+        assert!(p.contains('\u{25b8}'), "contains the advance arrow");
+    }
+
     #[test]
     fn reader_prompt_is_dim_and_has_counts() {
         let p = reader_prompt(2, 5);

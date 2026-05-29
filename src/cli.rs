@@ -571,6 +571,39 @@ mod tests {
     }
 
     #[test]
+    fn parse_args_by_equals_form_all_units() {
+        // The `=`-joined form works for the non-line units too (existing
+        // coverage only exercised `--by=line`).
+        for (arg, want) in [
+            ("--by=sentence", Unit::Sentence),
+            ("--by=paragraph", Unit::Paragraph),
+        ] {
+            let Action::Run(opts) = parse_args([arg]).unwrap() else {
+                panic!("expected Run for {arg}");
+            };
+            assert_eq!(opts.by, want, "{arg}");
+        }
+    }
+
+    #[test]
+    fn parse_unit_trims_and_is_case_sensitive() {
+        // Surrounding whitespace is trimmed, but matching is exact/lowercase:
+        // "Line" is not accepted.
+        assert_eq!(parse_unit(" line ").unwrap(), Unit::Line);
+        assert!(parse_unit("Line").is_err());
+    }
+
+    #[test]
+    fn parse_args_read_and_by_combined_order_independent() {
+        // `--read` then `--by line` sets both regardless of ordering.
+        let Action::Run(opts) = parse_args(["--read", "--by", "line"]).unwrap() else {
+            panic!("expected Run");
+        };
+        assert!(opts.read);
+        assert_eq!(opts.by, Unit::Line);
+    }
+
+    #[test]
     fn parse_args_missing_value_for_each_flag() {
         // A trailing value-taking flag with no following argument errors.
         assert!(parse_args(["--from"]).is_err());
