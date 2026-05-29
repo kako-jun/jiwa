@@ -197,6 +197,12 @@ where
             }
             "--sound" => {
                 let v = take_value(flag, &mut inline, &mut iter)?;
+                // A value-taking flag must carry a real value; an empty
+                // string (`--sound=` or `--sound ""`) would otherwise be
+                // accepted as `Some("")` and silently no-op at load.
+                if v.trim().is_empty() {
+                    return Err(flag_err("--sound", &v, "expected a path or URL"));
+                }
                 opts.sound = Some(v);
             }
             _ => {
