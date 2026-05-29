@@ -155,6 +155,29 @@ fn final_render_sequence(prev_rows: usize, final_frame: &str) -> Vec<u8> {
     buf
 }
 
+/// Whether the graphemes newly revealed this frame (`snap[prev_visible..visible]`)
+/// include at least one non-whitespace grapheme. Returns `false` when
+/// `visible <= prev_visible` (no progress, including regressions).
+///
+/// The sound is voiced "once per frame, never on whitespace-only steps", so
+/// the reveal loop uses this to decide whether to play: a frame that only
+/// added spaces/tabs/newlines stays silent, and a fast (single-burst) reveal
+/// still triggers exactly one play. Whitespace is judged by
+/// [`char::is_whitespace`], which treats the full-width space `\u{3000}` as
+/// blank too.
+fn increment_has_printable(
+    snap: &[jiwa::RevealedGrapheme],
+    prev_visible: usize,
+    visible: usize,
+) -> bool {
+    if visible <= prev_visible {
+        return false;
+    }
+    snap[prev_visible..visible]
+        .iter()
+        .any(|g| !g.text.chars().all(char::is_whitespace))
+}
+
 /// Reveal one block of text in place, writing into the already-prepared
 /// `out` (the caller has emitted [`ENTER`] and is holding a [`TermGuard`]).
 ///
@@ -228,13 +251,8 @@ fn reveal_segment<W: Write>(
         // into view than the last, and any of those new graphemes is not
         // pure whitespace, play the sound once (best-effort, non-blocking).
         if let Some(s) = sound {
-            if visible > prev_visible {
-                let has_printable = snap[prev_visible..visible]
-                    .iter()
-                    .any(|g| !g.text.chars().all(char::is_whitespace));
-                if has_printable {
-                    s.play();
-                }
+            if increment_has_printable(&snap, prev_visible, visible) {
+                s.play();
             }
         }
         prev_visible = visible;
@@ -410,5 +428,57 @@ mod tests {
         assert_eq!(ENTER, b"\x1b[?25l\x1b[?7l");
         assert_eq!(RESTORE, b"\x1b[?25h\x1b[?7h");
         assert!(RESTORE.ends_with(AUTOWRAP_ON));
+    }
+
+    /// Build a fully-visible snapshot (every grapheme of `text` present, one
+    /// `RevealedGrapheme` each) for exercising `increment_has_printable`. A
+    /// zero `char_interval` makes the whole text visible at `now`.
+    fn snap_of(text: &str) -> Vec<jiwa::RevealedGrapheme> {
+        let opts = jiwa::RevealOpts {
+            char_interval: Duration::ZERO,
+            fade_duration: Duration::ZERO,
+            fade_from: Rgb(0, 0, 0),
+            fade_to: Rgb(255, 255, 255),
+        };
+        let now = Instant::now();
+        jiwa::RevealHandle::start_at(text, opts, now).snapshot(now)
+    }
+
+    #[test]
+    fn increment_no_progress_is_false() {
+        // No new graphemes since last frame -> never plays.
+        let snap = snap_of("ab");
+        assert!(!increment_has_printable(&snap, 0, 0));
+    }
+
+    #[test]
+    fn increment_regression_is_false() {
+        // A visible count that went backwards (visible < prev) is no progress.
+        let snap = snap_of("abc");
+        assert!(!increment_has_printable(&snap, 2, 1));
+    }
+
+    #[test]
+    fn increment_all_whitespace_is_false() {
+        // A new increment made entirely of whitespace (ASCII space, tab,
+        // full-width space U+3000, newline) must not voice — confirming the
+        // full-width space is treated as blank by `char::is_whitespace`.
+        let snap = snap_of(" \t\u{3000}\n");
+        assert!(!increment_has_printable(&snap, 0, snap.len()));
+    }
+
+    #[test]
+    fn increment_with_one_printable_is_true() {
+        // One non-blank grapheme among whitespace is enough to voice.
+        let snap = snap_of("  x ");
+        assert!(increment_has_printable(&snap, 0, snap.len()));
+    }
+
+    #[test]
+    fn increment_single_burst_multiple_is_true() {
+        // A single burst (prev=0, visible=N, as with char_interval=0) that
+        // contains printable text triggers exactly one positive judgement.
+        let snap = snap_of("hello");
+        assert!(increment_has_printable(&snap, 0, snap.len()));
     }
 }
