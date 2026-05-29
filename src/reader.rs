@@ -36,10 +36,15 @@ const CLOSERS: &[char] = &['」', '』', '）', ')', '"', '\'', '”', '’'];
 /// (whitespace-only after trimming) are dropped, but interior whitespace
 /// and newlines are preserved so each segment reads naturally.
 pub fn segment(text: &str, unit: Unit) -> Vec<String> {
+    // Normalize newlines first so the splitters never see `\r`: CRLF (`\r\n`)
+    // and classic-Mac lone `\r` both collapse to `\n`. Without this, paragraph
+    // mode would not split on CRLF blank lines and sentence/line segments
+    // could carry a stray `\r`.
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
     match unit {
-        Unit::Sentence => segment_sentences(text),
-        Unit::Paragraph => segment_paragraphs(text),
-        Unit::Line => segment_lines(text),
+        Unit::Sentence => segment_sentences(&normalized),
+        Unit::Paragraph => segment_paragraphs(&normalized),
+        Unit::Line => segment_lines(&normalized),
     }
 }
 
