@@ -22,16 +22,22 @@
 //!   memory ([`Sound::bytes`]); graphemes never re-read or re-download.
 //!   The URL cache lives in a temp dir whose cleanup is the OS's job
 //!   (`tmpfiles` / reboot); jiwa does not manage or delete it.
-//! - No long-lived player process: each [`Sound::play`] spawns a fresh
-//!   short-lived player and throws it (we never `wait`), so nothing is
-//!   left resident.
+//! - No long-lived (resident) player process: each [`Sound::play`] spawns
+//!   a fresh short-lived player and never `wait`s on it, so the reveal
+//!   never blocks. We do not keep a daemon/server player running. The
+//!   only state retained is a handle to each spawned child so the *next*
+//!   [`Sound::play`] can `try_wait` (non-blocking) to reap finished
+//!   players — without that, fire-and-forget children would linger as
+//!   zombies (defunct) until the jiwa process exits, consuming PIDs over
+//!   a long `--read` session.
 //!
 //! Binary-only: not referenced by `lib.rs`.
 
+use std::cell::RefCell;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
 /// A resolved player: the command to run plus how it takes audio.
 #[derive(Debug, Clone, PartialEq)]
@@ -55,13 +61,26 @@ pub enum Feed {
 }
 
 /// A loaded sound: the audio bytes (read once) plus the detected player.
-#[derive(Debug, Clone)]
+///
+/// Not `Clone`: it owns the spawned [`Child`] handles (see `children`),
+/// which are not cloneable. Nothing in jiwa needs a `Sound` clone — it is
+/// loaded once and shared by reference.
+#[derive(Debug)]
 pub struct Sound {
+    /// The in-memory audio bytes, streamed to each [`Feed::Stdin`] player.
+    /// Empty for [`Feed::Path`] players: those replay from `path_for_player`
+    /// instead, so holding the bytes in RAM too would just waste memory.
     bytes: Vec<u8>,
     player: Player,
     /// Temp path holding the bytes, for [`Feed::Path`] players (`afplay`).
     /// Written once at load; reused on every [`Sound::play`].
     path_for_player: Option<PathBuf>,
+    /// Handles to player processes spawned by [`Sound::play`] but never
+    /// `wait`ed on. Each `play` first `try_wait`s these (non-blocking) and
+    /// drops the finished ones, so fire-and-forget children are reaped at
+    /// the next play instead of accumulating as zombies. `RefCell` gives
+    /// the interior mutability `play(&self)` needs.
+    children: RefCell<Vec<Child>>,
 }
 
 /// Player candidates, in priority order. Stdin-capable players come first
@@ -140,11 +159,18 @@ pub fn load(spec: &str) -> Option<Sound> {
 
     // For path-only players, write the bytes to a temp file once now so
     // `play` can hand over the path without re-reading anything.
-    let path_for_player = match player.feed {
+    let (bytes, path_for_player) = match player.feed {
         Feed::Path => {
+            // The temp name is `jiwa-play-<hash(spec)>`: two jiwa runs
+            // using the *same* source share this path. The contents are
+            // identical (same source bytes), so a concurrent overwrite is
+            // harmless — at worst both write the same data.
             let p = temp_path(&format!("jiwa-play-{}", hash_hex(spec)), spec);
             match std::fs::write(&p, &bytes) {
-                Ok(()) => Some(p),
+                // The bytes now live entirely in the temp file; drop the
+                // in-memory copy (Feed::Path replays from the path, never
+                // from `bytes`) so we do not double-hold the audio in RAM.
+                Ok(()) => (Vec::new(), Some(p)),
                 Err(e) => {
                     note(&format!(
                         "cannot stage sound for player: {e}; playing silently"
@@ -153,22 +179,34 @@ pub fn load(spec: &str) -> Option<Sound> {
                 }
             }
         }
-        Feed::Stdin => None,
+        Feed::Stdin => (bytes, None),
     };
 
     Some(Sound {
         bytes,
         player,
         path_for_player,
+        children: RefCell::new(Vec::new()),
     })
 }
 
 impl Sound {
     /// Play the sound once. Spawns a fresh short-lived player and returns
     /// immediately without waiting — non-blocking so the reveal never
-    /// stalls, and stateless so nothing stays resident. All failures are
-    /// ignored (best-effort).
+    /// stalls. All failures are ignored (best-effort).
+    ///
+    /// Before spawning we `try_wait` (non-blocking) the children from prior
+    /// plays and drop the finished ones, reaping them so they do not linger
+    /// as zombies. This bounds the retained handles to roughly the number of
+    /// players still actively playing, instead of one per reveal frame.
     pub fn play(&self) {
+        let mut children = self.children.borrow_mut();
+        // Reap finished players: keep only those still running. `try_wait`
+        // returning `Ok(Some(_))` (exited) or `Err(_)` reaps/clears the
+        // child, so dropping it leaves no zombie; `Ok(None)` means it is
+        // still playing and must be retained.
+        children.retain_mut(|c| matches!(c.try_wait(), Ok(None)));
+
         let mut cmd = Command::new(&self.player.cmd);
         cmd.args(&self.player.args)
             .stdout(Stdio::null())
@@ -184,13 +222,17 @@ impl Sound {
                         // not `wait` (fire-and-forget, non-blocking).
                         let _ = stdin.write_all(&self.bytes);
                     }
+                    // Retain the handle so a later `play` can reap it.
+                    children.push(child);
                 }
             }
             Feed::Path => {
                 cmd.stdin(Stdio::null());
                 if let Some(path) = &self.path_for_player {
                     cmd.arg(path);
-                    let _ = cmd.spawn();
+                    if let Ok(child) = cmd.spawn() {
+                        children.push(child);
+                    }
                 }
             }
         }
@@ -198,8 +240,13 @@ impl Sound {
 }
 
 /// True if `spec` looks like an HTTP(S) URL we should fetch.
+///
+/// URL schemes are case-insensitive (RFC 3986 §3.1), so `HTTP://x` counts.
+/// Only the *detection* lowercases; `load`/`load_url` pass the original
+/// `spec` to curl/wget unchanged.
 pub fn is_url(spec: &str) -> bool {
-    spec.starts_with("http://") || spec.starts_with("https://")
+    let lower = spec.to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
 }
 
 /// Fetch a URL into the temp cache (once) and return its bytes.
@@ -324,7 +371,10 @@ fn guess_extension(source: &str) -> Option<String> {
 }
 
 /// Hash `s` (SipHash via std's [`DefaultHasher`]) to a lowercase hex u64.
-/// Crate-free stable-per-string name for the temp cache file.
+/// Crate-free name for the temp cache file. The value is stable *within a
+/// single build* (same input -> same hash for this binary), which is all
+/// the temp-cache name needs; std does not promise [`DefaultHasher`] output
+/// is stable across Rust versions, so do not persist or compare it elsewhere.
 pub fn hash_hex(s: &str) -> String {
     let mut h = DefaultHasher::new();
     s.hash(&mut h);
@@ -460,11 +510,16 @@ mod tests {
     }
 
     #[test]
-    fn is_url_is_case_sensitive() {
-        // The scheme match is byte-exact lowercase: uppercase schemes are not
-        // recognized as URLs (current fixed behavior).
-        assert!(!is_url("HTTP://x"));
-        assert!(!is_url("HTTPS://x"));
+    fn is_url_is_case_insensitive() {
+        // URL schemes are case-insensitive (RFC 3986), so uppercase and
+        // mixed-case http(s) schemes are recognized as URLs.
+        assert!(is_url("HTTP://x"));
+        assert!(is_url("HTTPS://X"));
+        assert!(is_url("HtTpS://Example.com/a.wav"));
+        // A non-http scheme is still not a URL we fetch.
+        assert!(!is_url("ftp://example.com/a.wav"));
+        // A local path that merely embeds "http" is not a URL.
+        assert!(!is_url("./my-http-sound.wav"));
     }
 
     #[test]
