@@ -130,6 +130,36 @@ opened), reader mode falls back to verbatim passthrough so pipes and
 files stay clean. This is **Phase 1**: Enter-delimited and dependency-free
 (no raw mode); single-keypress advance and reveal-skipping are future work.
 
+### Sound
+
+`--sound <PATH|URL>` gives the typewriter a voice: a short sound plays
+each time a reveal frame brings new non-whitespace text into view
+(whitespace-only steps stay silent, and it is one play per frame so fast
+reveals don't spawn a storm of players). Works in reader mode too.
+
+```sh
+# a local clack on every character
+echo "Hello" | jiwa --stagger 60ms --sound ./clack.wav
+
+# fetch a sound once (cached in a temp dir), then reuse it
+cat novel.txt | jiwa --read --stagger 40ms --sound https://example.com/blip.wav
+```
+
+`jiwa` keeps **zero dependencies** here: it never decodes audio itself.
+You supply the sound file; playback shells out to whatever OS player is
+present (`ffplay` / `mpv` / `aplay` / `pw-cat`, or macOS `afplay`), and a
+URL is downloaded once with `curl` (or `wget`). The bytes are read **once**
+at startup and held in memory — graphemes never re-read or re-download —
+and each play spawns a fresh, non-blocking process so the animation is
+never stalled and nothing stays resident.
+
+Everything is **best-effort**: if the file is missing, no fetcher or player
+exists, or playback fails, `jiwa` prints at most one quiet note and reveals
+silently. **WAV is recommended** (it plays from stdin cleanly across
+players); mp3/ogg depend on `ffplay`/`mpv`. For recording, let your terminal
+capture tool record the audio alongside the video — `jiwa` only produces the
+sound at the right moment.
+
 ### Long lines and interrupts
 
 While animating, `jiwa` redraws each frame in place with line-wrap

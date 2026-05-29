@@ -12,6 +12,7 @@
 mod cli;
 mod reader;
 mod render;
+mod sound;
 
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
@@ -62,7 +63,11 @@ fn main() -> ExitCode {
     if opts.read {
         if is_tty {
             if let Ok(tty) = File::open("/dev/tty") {
-                run_reader(&input, &opts, tty);
+                // Pass the sound *spec* (not a loaded `Sound`): `run_reader`
+                // loads it only after confirming there are non-empty
+                // segments to reveal, so an empty/whitespace-only novel that
+                // falls back to passthrough never pays the file/network I/O.
+                run_reader(&input, &opts, tty, opts.sound.as_deref());
                 return ExitCode::SUCCESS;
             }
         }
@@ -77,11 +82,15 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // Load the sound source once, only now that we know we will animate
+    // (passthrough above never reaches here, so it never triggers I/O).
+    let sound = opts.sound.as_deref().and_then(sound::load);
+
     let mut out = io::stdout().lock();
     let _ = out.write_all(ENTER);
     let _ = out.flush();
     let _guard = TermGuard;
-    reveal_segment(&mut out, &input, &opts);
+    reveal_segment(&mut out, &input, &opts, sound.as_ref());
     ExitCode::SUCCESS
 }
 
@@ -146,6 +155,29 @@ fn final_render_sequence(prev_rows: usize, final_frame: &str) -> Vec<u8> {
     buf
 }
 
+/// Whether the graphemes newly revealed this frame (`snap[prev_visible..visible]`)
+/// include at least one non-whitespace grapheme. Returns `false` when
+/// `visible <= prev_visible` (no progress, including regressions).
+///
+/// The sound is voiced "once per frame, never on whitespace-only steps", so
+/// the reveal loop uses this to decide whether to play: a frame that only
+/// added spaces/tabs/newlines stays silent, and a fast (single-burst) reveal
+/// still triggers exactly one play. Whitespace is judged by
+/// [`char::is_whitespace`], which treats the full-width space `\u{3000}` as
+/// blank too.
+fn increment_has_printable(
+    snap: &[jiwa::RevealedGrapheme],
+    prev_visible: usize,
+    visible: usize,
+) -> bool {
+    if visible <= prev_visible {
+        return false;
+    }
+    snap[prev_visible..visible]
+        .iter()
+        .any(|g| !g.text.chars().all(char::is_whitespace))
+}
+
 /// Reveal one block of text in place, writing into the already-prepared
 /// `out` (the caller has emitted [`ENTER`] and is holding a [`TermGuard`]).
 ///
@@ -163,7 +195,12 @@ fn final_render_sequence(prev_rows: usize, final_frame: &str) -> Vec<u8> {
 /// [`RESTORE`]. This differs from the old `animate_reveal`, which short-
 /// circuited to passthrough *before* [`ENTER`]. The difference is harmless:
 /// the escapes are balanced and the terminal is restored on guard drop.
-fn reveal_segment<W: Write>(out: &mut W, input: &str, opts: &CliOpts) {
+fn reveal_segment<W: Write>(
+    out: &mut W,
+    input: &str,
+    opts: &CliOpts,
+    sound: Option<&sound::Sound>,
+) {
     let tokens = tokenize(input);
     let plain = plain_text(&tokens);
 
@@ -193,6 +230,11 @@ fn reveal_segment<W: Write>(out: &mut W, input: &str, opts: &CliOpts) {
     // (e.g. 60 fps -> 16.667 ms, not the 16 ms an integer division gives).
     let frame_delay = Duration::from_secs_f64(1.0 / f64::from(opts.fps));
     let mut prev_rows = 0usize;
+    // Track how many graphemes were visible last frame so we can detect the
+    // increment newly revealed this frame and, if it includes any non-blank
+    // grapheme, voice it once (one play per frame — keeps fast reveals from
+    // spawning a player storm and never sounds on whitespace-only steps).
+    let mut prev_visible = 0usize;
 
     // The loop yields its final snapshot, making that fully-revealed frame
     // the single source of truth for the confirmed render's colors. (The
@@ -204,6 +246,17 @@ fn reveal_segment<W: Write>(out: &mut W, input: &str, opts: &CliOpts) {
 
         let snap = handle.snapshot(now);
         let visible = snap.len();
+
+        // Voice newly revealed text. If this frame brought more graphemes
+        // into view than the last, and any of those new graphemes is not
+        // pure whitespace, play the sound once (best-effort, non-blocking).
+        if let Some(s) = sound {
+            if increment_has_printable(&snap, prev_visible, visible) {
+                s.play();
+            }
+        }
+        prev_visible = visible;
+
         let colors: Vec<Rgb> = snap.iter().map(|g| g.color).collect();
 
         let frame = render_frame(&tokens.tokens, visible, &colors, tokens.has_input_color);
@@ -236,13 +289,19 @@ fn reveal_segment<W: Write>(out: &mut W, input: &str, opts: &CliOpts) {
 /// the reader advances, so scrollback keeps only the novel text. A single
 /// [`TermGuard`] covers every segment so the cursor/wrap state is restored
 /// no matter how the loop exits.
-fn run_reader(input: &str, opts: &CliOpts, tty: File) {
+fn run_reader(input: &str, opts: &CliOpts, tty: File, sound_spec: Option<&str>) {
     let segments = reader::segment(input, opts.by);
     if segments.is_empty() {
-        // Nothing readable: stay clean, behave like passthrough.
+        // Nothing readable: stay clean, behave like passthrough. We have not
+        // loaded the sound yet, so this passthrough triggers no I/O.
         passthrough(input);
         return;
     }
+
+    // Only now, with at least one segment to reveal, load the sound (once).
+    // Loading here rather than in `main` keeps the empty-input passthrough
+    // above free of any file/network I/O or stderr note.
+    let sound = sound_spec.and_then(sound::load);
 
     let mut out = io::stdout().lock();
     let _ = out.write_all(ENTER);
@@ -253,7 +312,7 @@ fn run_reader(input: &str, opts: &CliOpts, tty: File) {
     let total = segments.len();
 
     for (i, seg) in segments.iter().enumerate() {
-        reveal_segment(&mut out, seg, opts);
+        reveal_segment(&mut out, seg, opts, sound.as_ref());
 
         // The last segment is not followed by a wait.
         if i + 1 == total {
@@ -375,5 +434,57 @@ mod tests {
         assert_eq!(ENTER, b"\x1b[?25l\x1b[?7l");
         assert_eq!(RESTORE, b"\x1b[?25h\x1b[?7h");
         assert!(RESTORE.ends_with(AUTOWRAP_ON));
+    }
+
+    /// Build a fully-visible snapshot (every grapheme of `text` present, one
+    /// `RevealedGrapheme` each) for exercising `increment_has_printable`. A
+    /// zero `char_interval` makes the whole text visible at `now`.
+    fn snap_of(text: &str) -> Vec<jiwa::RevealedGrapheme> {
+        let opts = jiwa::RevealOpts {
+            char_interval: Duration::ZERO,
+            fade_duration: Duration::ZERO,
+            fade_from: Rgb(0, 0, 0),
+            fade_to: Rgb(255, 255, 255),
+        };
+        let now = Instant::now();
+        jiwa::RevealHandle::start_at(text, opts, now).snapshot(now)
+    }
+
+    #[test]
+    fn increment_no_progress_is_false() {
+        // No new graphemes since last frame -> never plays.
+        let snap = snap_of("ab");
+        assert!(!increment_has_printable(&snap, 0, 0));
+    }
+
+    #[test]
+    fn increment_regression_is_false() {
+        // A visible count that went backwards (visible < prev) is no progress.
+        let snap = snap_of("abc");
+        assert!(!increment_has_printable(&snap, 2, 1));
+    }
+
+    #[test]
+    fn increment_all_whitespace_is_false() {
+        // A new increment made entirely of whitespace (ASCII space, tab,
+        // full-width space U+3000, newline) must not voice — confirming the
+        // full-width space is treated as blank by `char::is_whitespace`.
+        let snap = snap_of(" \t\u{3000}\n");
+        assert!(!increment_has_printable(&snap, 0, snap.len()));
+    }
+
+    #[test]
+    fn increment_with_one_printable_is_true() {
+        // One non-blank grapheme among whitespace is enough to voice.
+        let snap = snap_of("  x ");
+        assert!(increment_has_printable(&snap, 0, snap.len()));
+    }
+
+    #[test]
+    fn increment_single_burst_multiple_is_true() {
+        // A single burst (prev=0, visible=N, as with char_interval=0) that
+        // contains printable text triggers exactly one positive judgement.
+        let snap = snap_of("hello");
+        assert!(increment_has_printable(&snap, 0, snap.len()));
     }
 }
