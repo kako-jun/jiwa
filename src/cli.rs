@@ -54,7 +54,7 @@ Reads all of stdin, then reveals it on stdout. With no animation flags
 
 OPTIONS:
     --fade <DUR>      Per-grapheme fade duration (e.g. 200ms, 1.5s, 50).
-                      Default 0 (no fade).
+                      Default 0 (no fade). Also accepts `--fade=200ms`.
     --stagger <DUR>   Typewriter step between graphemes (e.g. 30ms).
                       Default 0 (all graphemes at once).
     --from <COLOR>    Fade start color (#rrggbb / rgb / #rgb). Default #282828.
@@ -63,9 +63,21 @@ OPTIONS:
     -h, --help        Print this help and exit.
     -V, --version     Print version and exit.
 
+Value-taking flags accept either a separate argument (`--fade 200ms`) or
+an `=`-joined form (`--fade=200ms`).
+
 DURATION:
     Suffix `ms` for milliseconds, `s` for seconds (decimals allowed).
     A bare number is treated as milliseconds.
+
+DISPLAY:
+    During the animation jiwa disables line-wrap and redraws frames in
+    place, so lines longer than the terminal are clipped; the final
+    confirmed render re-enables wrap so long lines wrap normally in
+    scrollback. If you interrupt the animation with Ctrl-C, the terminal
+    may be left with the cursor hidden and wrap off (jiwa stays
+    dependency-free and installs no signal handler); run `reset` to
+    restore it.
 
 COLOR:
     `#rrggbb`, `rrggbb`, `#rgb`, or `rgb`. The leading `#` is optional;
@@ -90,36 +102,50 @@ where
 
     while let Some(raw) = iter.next() {
         let arg = raw.as_ref();
-        match arg {
+
+        // Support the `--flag=value` form: a long flag carrying an inline
+        // value. Short flags (`-h`/`-V`) and value-less flags keep the
+        // separate-argument form. We split here so each match arm can ask
+        // for its value uniformly via `take_value`.
+        let (flag, mut inline): (&str, Option<String>) = if arg.starts_with("--") {
+            match arg.split_once('=') {
+                Some((f, v)) => (f, Some(v.to_string())),
+                None => (arg, None),
+            }
+        } else {
+            (arg, None)
+        };
+
+        match flag {
             "-h" | "--help" => return Ok(Action::Help),
             "-V" | "--version" => return Ok(Action::Version),
             "--fade" => {
-                let v = take_value(arg, &mut iter)?;
+                let v = take_value(flag, &mut inline, &mut iter)?;
                 opts.fade = parse_duration(&v).map_err(|e| flag_err("--fade", &v, &e))?;
             }
             "--stagger" => {
-                let v = take_value(arg, &mut iter)?;
+                let v = take_value(flag, &mut inline, &mut iter)?;
                 opts.stagger = parse_duration(&v).map_err(|e| flag_err("--stagger", &v, &e))?;
             }
             "--from" => {
-                let v = take_value(arg, &mut iter)?;
+                let v = take_value(flag, &mut inline, &mut iter)?;
                 opts.from = parse_color(&v).map_err(|e| flag_err("--from", &v, &e))?;
             }
             "--to" => {
-                let v = take_value(arg, &mut iter)?;
+                let v = take_value(flag, &mut inline, &mut iter)?;
                 opts.to = parse_color(&v).map_err(|e| flag_err("--to", &v, &e))?;
             }
             "--fps" => {
-                let v = take_value(arg, &mut iter)?;
+                let v = take_value(flag, &mut inline, &mut iter)?;
                 let n: u32 = v
                     .trim()
                     .parse()
                     .map_err(|_| flag_err("--fps", &v, "expected an integer"))?;
                 opts.fps = n.clamp(FPS_MIN, FPS_MAX);
             }
-            other => {
+            _ => {
                 return Err(format!(
-                    "jiwa: unknown argument `{other}`\nTry `jiwa --help`."
+                    "jiwa: unknown argument `{arg}`\nTry `jiwa --help`."
                 ));
             }
         }
@@ -128,11 +154,22 @@ where
     Ok(Action::Run(opts))
 }
 
-fn take_value<I, S>(flag: &str, iter: &mut std::iter::Peekable<I>) -> Result<String, String>
+/// Resolve the value for a value-taking flag.
+///
+/// Prefers an inline `--flag=value` value (consumed here); otherwise pulls
+/// the next argument. Errors if neither is present.
+fn take_value<I, S>(
+    flag: &str,
+    inline: &mut Option<String>,
+    iter: &mut std::iter::Peekable<I>,
+) -> Result<String, String>
 where
     I: Iterator<Item = S>,
     S: AsRef<str>,
 {
+    if let Some(v) = inline.take() {
+        return Ok(v);
+    }
     match iter.next() {
         Some(v) => Ok(v.as_ref().to_string()),
         None => Err(format!(
@@ -380,6 +417,39 @@ mod tests {
             panic!("expected Run");
         };
         assert_eq!(opts.fade, Duration::from_millis(200));
+    }
+
+    #[test]
+    fn parse_args_accepts_equals_form() {
+        // `--flag=value` is equivalent to `--flag value`.
+        let Action::Run(opts) = parse_args([
+            "--fade=200ms",
+            "--stagger=30ms",
+            "--from=#000",
+            "--to=#fff",
+            "--fps=30",
+        ])
+        .unwrap() else {
+            panic!("expected Run");
+        };
+        assert_eq!(opts.fade, Duration::from_millis(200));
+        assert_eq!(opts.stagger, Duration::from_millis(30));
+        assert_eq!(opts.from, Rgb(0, 0, 0));
+        assert_eq!(opts.to, Rgb(255, 255, 255));
+        assert_eq!(opts.fps, 30);
+    }
+
+    #[test]
+    fn parse_args_equals_form_empty_value_errors() {
+        // `--fade=` supplies an empty value, which is an invalid duration.
+        assert!(parse_args(["--fade="]).is_err());
+    }
+
+    #[test]
+    fn parse_args_equals_form_value_with_equals() {
+        // Only the first `=` splits flag from value; later `=` stay in the
+        // value (colors/durations never contain `=`, but the rule is total).
+        assert!(parse_args(["--fps=1=2"]).is_err());
     }
 
     #[test]
