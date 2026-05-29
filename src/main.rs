@@ -10,9 +10,11 @@
 //! files never receive cursor-control noise.
 
 mod cli;
+mod reader;
 mod render;
 
-use std::io::{self, IsTerminal, Read, Write};
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
 use std::process::ExitCode;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -20,6 +22,7 @@ use std::time::{Duration, Instant};
 use jiwa::{RevealHandle, RevealOpts, Rgb};
 
 use cli::{Action, CliOpts};
+use reader::reader_prompt;
 use render::{plain_text, render_frame, tokenize, visible_newline_rows};
 
 fn main() -> ExitCode {
@@ -50,15 +53,35 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
-    let animate = !(opts.fade.is_zero() && opts.stagger.is_zero());
     let is_tty = io::stdout().is_terminal();
+
+    // Reader mode needs an interactive terminal both to draw and to read
+    // keypresses from /dev/tty. When stdout is not a TTY, or /dev/tty
+    // cannot be opened, fall back to verbatim passthrough so pipes/files
+    // stay clean — exactly like the non-animated path.
+    if opts.read {
+        if is_tty {
+            if let Ok(tty) = File::open("/dev/tty") {
+                run_reader(&input, &opts, tty);
+                return ExitCode::SUCCESS;
+            }
+        }
+        passthrough(&input);
+        return ExitCode::SUCCESS;
+    }
+
+    let animate = !(opts.fade.is_zero() && opts.stagger.is_zero());
 
     if !animate || !is_tty {
         passthrough(&input);
         return ExitCode::SUCCESS;
     }
 
-    animate_reveal(&input, &opts);
+    let mut out = io::stdout().lock();
+    let _ = out.write_all(ENTER);
+    let _ = out.flush();
+    let _guard = TermGuard;
+    reveal_segment(&mut out, &input, &opts);
     ExitCode::SUCCESS
 }
 
@@ -123,7 +146,24 @@ fn final_render_sequence(prev_rows: usize, final_frame: &str) -> Vec<u8> {
     buf
 }
 
-fn animate_reveal(input: &str, opts: &CliOpts) {
+/// Reveal one block of text in place, writing into the already-prepared
+/// `out` (the caller has emitted [`ENTER`] and is holding a [`TermGuard`]).
+///
+/// Factored out of the original `animate_reveal` so reader mode can reveal
+/// one segment per call while reusing the exact same timing, cursor, and
+/// final-render machinery. The terminal-setup/teardown is the caller's
+/// responsibility so multiple segments share a single guard.
+///
+/// Escape-only / empty input (no printable graphemes) is emitted verbatim
+/// with a trailing newline, the same content the passthrough path would
+/// produce, just written through the already-open handle.
+///
+/// Note: an escape-only segment is emitted verbatim through the already-open
+/// handle (inside the guard's terminal setup) — i.e. between [`ENTER`] and
+/// [`RESTORE`]. This differs from the old `animate_reveal`, which short-
+/// circuited to passthrough *before* [`ENTER`]. The difference is harmless:
+/// the escapes are balanced and the terminal is restored on guard drop.
+fn reveal_segment<W: Write>(out: &mut W, input: &str, opts: &CliOpts) {
     let tokens = tokenize(input);
     let plain = plain_text(&tokens);
 
@@ -137,21 +177,17 @@ fn animate_reveal(input: &str, opts: &CliOpts) {
     let start = Instant::now();
     let handle = RevealHandle::start_at(&plain, reveal_opts, start);
 
-    // No printable graphemes (e.g. escape-only input): there is nothing to
-    // animate, so behave exactly like the non-TTY pass-through path and emit
-    // the input verbatim rather than entering cursor control (which would
-    // otherwise swallow the input).
+    // No printable graphemes (e.g. escape-only input): nothing to animate.
+    // Emit it verbatim (with a trailing newline) rather than entering the
+    // redraw loop, which would otherwise swallow the bytes.
     if handle.total_graphemes() == 0 {
-        passthrough(input);
+        let _ = out.write_all(input.as_bytes());
+        if !input.ends_with('\n') {
+            let _ = out.write_all(b"\n");
+        }
+        let _ = out.flush();
         return;
     }
-
-    let mut out = io::stdout().lock();
-    // Hide cursor + disable autowrap during the animation; the guard puts
-    // both back no matter how we leave.
-    let _ = out.write_all(ENTER);
-    let _ = out.flush();
-    let _guard = TermGuard;
 
     // Use the nominal fps directly so the frame interval matches it exactly
     // (e.g. 60 fps -> 16.667 ms, not the 16 ms an integer division gives).
@@ -189,7 +225,90 @@ fn animate_reveal(input: &str, opts: &CliOpts) {
     let final_frame = render_frame(&tokens.tokens, visible, &colors, tokens.has_input_color);
     let _ = out.write_all(&final_render_sequence(prev_rows, &final_frame));
     let _ = out.flush();
-    // `_guard` drops here, restoring cursor visibility.
+}
+
+/// Interactive reader loop (sound-novel mode).
+///
+/// Reveals each segment of `input` in place, then waits for a line on
+/// `tty` (the controlling terminal, opened by the caller because stdin is
+/// occupied by the piped novel) before advancing. Enter advances; `q` or
+/// EOF (Ctrl-D) ends the session early. The waiting prompt is erased once
+/// the reader advances, so scrollback keeps only the novel text. A single
+/// [`TermGuard`] covers every segment so the cursor/wrap state is restored
+/// no matter how the loop exits.
+fn run_reader(input: &str, opts: &CliOpts, tty: File) {
+    let segments = reader::segment(input, opts.by);
+    if segments.is_empty() {
+        // Nothing readable: stay clean, behave like passthrough.
+        passthrough(input);
+        return;
+    }
+
+    let mut out = io::stdout().lock();
+    let _ = out.write_all(ENTER);
+    let _ = out.flush();
+    let _guard = TermGuard;
+
+    let mut keys = BufReader::new(tty);
+    let total = segments.len();
+
+    for (i, seg) in segments.iter().enumerate() {
+        reveal_segment(&mut out, seg, opts);
+
+        // The last segment is not followed by a wait.
+        if i + 1 == total {
+            break;
+        }
+
+        // Dim "press Enter" prompt on its own line.
+        let prompt = reader_prompt(i + 1, total);
+        let _ = out.write_all(prompt.as_bytes());
+        let _ = out.flush();
+
+        let mut line = String::new();
+        match keys.read_line(&mut line) {
+            // EOF (Ctrl-D): end the session. No newline was echoed (the read
+            // returned 0 bytes), so do not step the cursor up.
+            Ok(0) => {
+                erase_prompt(&mut out, false);
+                break;
+            }
+            Ok(_) => {
+                // A line that reached us with its trailing `\n` means the
+                // terminal echoed that newline (cooked mode), dropping the
+                // cursor one row below the prompt; tell `erase_prompt` so it
+                // steps back up before clearing. A line without `\n` (e.g.
+                // `q` then Ctrl-D) was not newline-echoed.
+                let echoed = line.ends_with('\n');
+                // Erase the prompt line so scrollback keeps only the text.
+                erase_prompt(&mut out, echoed);
+                // Only an exact `q` (after trim) quits; other input advances.
+                if line.trim() == "q" {
+                    break;
+                }
+            }
+            // Read error: stop cleanly rather than spinning. Nothing was
+            // echoed in this case either.
+            Err(_) => {
+                erase_prompt(&mut out, false);
+                break;
+            }
+        }
+    }
+}
+
+/// Erase the reader prompt. In cooked mode (no raw mode — jiwa is
+/// dependency-free) pressing Enter makes the terminal echo a newline,
+/// dropping the cursor one row below the prompt; when that happened
+/// (`echoed_newline`) we step back up first. Then clear from the cursor
+/// downward so the prompt line (and the blank line the echo produced) are
+/// both removed, leaving scrollback with only the novel text.
+fn erase_prompt<W: Write>(out: &mut W, echoed_newline: bool) {
+    if echoed_newline {
+        let _ = out.write_all(b"\x1b[1A");
+    }
+    let _ = out.write_all(b"\r\x1b[J");
+    let _ = out.flush();
 }
 
 #[cfg(test)]
@@ -228,6 +347,25 @@ mod tests {
         let seq = final_render_sequence(2, "X");
         assert_eq!(seq, b"\x1b[2A\r\x1b[J\x1b[?7hX\n".to_vec());
         assert_eq!(seq.last(), Some(&b'\n'), "must end with a trailing newline");
+    }
+
+    #[test]
+    fn erase_prompt_steps_up_when_newline_echoed() {
+        // Cooked-mode Enter echoes a newline (cursor drops one row): step the
+        // cursor up first, then clear from the cursor downward so both the
+        // prompt line and the echo's blank line are removed.
+        let mut buf = Vec::new();
+        erase_prompt(&mut buf, true);
+        assert_eq!(buf, b"\x1b[1A\r\x1b[J".to_vec());
+    }
+
+    #[test]
+    fn erase_prompt_no_step_up_without_echo() {
+        // EOF / read-error / no-newline input did not echo a newline, so the
+        // cursor is still on the prompt line: clear in place, no cursor-up.
+        let mut buf = Vec::new();
+        erase_prompt(&mut buf, false);
+        assert_eq!(buf, b"\r\x1b[J".to_vec());
     }
 
     #[test]

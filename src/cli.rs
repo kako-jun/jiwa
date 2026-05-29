@@ -9,6 +9,8 @@ use std::time::Duration;
 
 use jiwa::Rgb;
 
+use crate::reader::Unit;
+
 /// Fully-parsed CLI options.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CliOpts {
@@ -17,6 +19,11 @@ pub struct CliOpts {
     pub from: Rgb,
     pub to: Rgb,
     pub fps: u32,
+    /// Interactive reader (sound-novel) mode: reveal one segment at a time,
+    /// waiting for Enter on `/dev/tty` between segments.
+    pub read: bool,
+    /// Segment unit used by reader mode.
+    pub by: Unit,
 }
 
 impl Default for CliOpts {
@@ -27,6 +34,8 @@ impl Default for CliOpts {
             from: Rgb(40, 40, 40),
             to: Rgb(220, 220, 220),
             fps: 60,
+            read: false,
+            by: Unit::Sentence,
         }
     }
 }
@@ -60,11 +69,28 @@ OPTIONS:
     --from <COLOR>    Fade start color (#rrggbb / rgb / #rgb). Default #282828.
     --to <COLOR>      Fade end color. Default #dcdcdc.
     --fps <N>         Animation frame rate, clamped to 1..=240. Default 60.
+    --read            Interactive reader (sound-novel) mode: reveal one
+                      segment at a time, pausing for Enter between them.
+                      Reads keypresses from /dev/tty (stdin holds the text).
+                      Requires a TTY stdout; otherwise the input is passed
+                      through verbatim.
+    --by <UNIT>       Reader segment unit: sentence (default) / paragraph /
+                      line. Only meaningful with --read.
     -h, --help        Print this help and exit.
     -V, --version     Print version and exit.
 
 Value-taking flags accept either a separate argument (`--fade 200ms`) or
 an `=`-joined form (`--fade=200ms`).
+
+READER MODE:
+    `--read` turns a piped novel into a sound-novel reader: each segment
+    reveals, then jiwa waits for you to press Enter before the next one.
+
+        cat novel.txt | jiwa --read --stagger 40ms
+
+    Press Enter to advance; `q` or Ctrl-D (EOF) ends the session. The
+    waiting prompt is erased once you advance, so scrollback keeps only the
+    novel text.
 
 DURATION:
     Suffix `ms` for milliseconds, `s` for seconds (decimals allowed).
@@ -148,6 +174,14 @@ where
                     .parse()
                     .map_err(|_| flag_err("--fps", &v, "expected an integer"))?;
                 opts.fps = n.clamp(FPS_MIN, FPS_MAX);
+            }
+            "--read" => {
+                reject_inline(flag, &inline)?;
+                opts.read = true;
+            }
+            "--by" => {
+                let v = take_value(flag, &mut inline, &mut iter)?;
+                opts.by = parse_unit(&v).map_err(|e| flag_err("--by", &v, &e))?;
             }
             _ => {
                 return Err(format!(
@@ -256,6 +290,18 @@ pub fn parse_color(s: &str) -> Result<Rgb, String> {
             Ok(Rgb(r, g, b))
         }
         _ => Err(format!("`{s}` must be 3 or 6 hex digits")),
+    }
+}
+
+/// Parse a reader segment unit: `sentence`, `paragraph`, or `line`.
+pub fn parse_unit(s: &str) -> Result<Unit, String> {
+    match s.trim() {
+        "sentence" => Ok(Unit::Sentence),
+        "paragraph" => Ok(Unit::Paragraph),
+        "line" => Ok(Unit::Line),
+        other => Err(format!(
+            "`{other}` is not a unit (expected sentence, paragraph, or line)"
+        )),
     }
 }
 
@@ -479,6 +525,82 @@ mod tests {
         // The bare forms still work.
         assert_eq!(parse_args(["--help"]).unwrap(), Action::Help);
         assert_eq!(parse_args(["--version"]).unwrap(), Action::Version);
+    }
+
+    #[test]
+    fn parse_args_read_flag() {
+        // `--read` is a value-less bool; default is false.
+        let Action::Run(opts) = parse_args(["--read"]).unwrap() else {
+            panic!("expected Run");
+        };
+        assert!(opts.read);
+        assert_eq!(opts.by, Unit::Sentence, "default unit is sentence");
+
+        let Action::Run(opts) = parse_args::<[&str; 0], &str>([]).unwrap() else {
+            panic!("expected Run");
+        };
+        assert!(!opts.read, "read defaults to false");
+    }
+
+    #[test]
+    fn parse_args_by_units() {
+        for (arg, want) in [
+            ("sentence", Unit::Sentence),
+            ("paragraph", Unit::Paragraph),
+            ("line", Unit::Line),
+        ] {
+            let Action::Run(opts) = parse_args(["--by", arg]).unwrap() else {
+                panic!("expected Run");
+            };
+            assert_eq!(opts.by, want);
+        }
+        // `=`-joined form works too.
+        let Action::Run(opts) = parse_args(["--by=line"]).unwrap() else {
+            panic!("expected Run");
+        };
+        assert_eq!(opts.by, Unit::Line);
+    }
+
+    #[test]
+    fn parse_args_by_rejects_bad_unit_and_read_rejects_inline() {
+        // An unknown unit errors (caller exits 2).
+        assert!(parse_args(["--by", "word"]).is_err());
+        assert!(parse_args(["--by"]).is_err());
+        // `--read` takes no value.
+        assert!(parse_args(["--read=1"]).is_err());
+    }
+
+    #[test]
+    fn parse_args_by_equals_form_all_units() {
+        // The `=`-joined form works for the non-line units too (existing
+        // coverage only exercised `--by=line`).
+        for (arg, want) in [
+            ("--by=sentence", Unit::Sentence),
+            ("--by=paragraph", Unit::Paragraph),
+        ] {
+            let Action::Run(opts) = parse_args([arg]).unwrap() else {
+                panic!("expected Run for {arg}");
+            };
+            assert_eq!(opts.by, want, "{arg}");
+        }
+    }
+
+    #[test]
+    fn parse_unit_trims_and_is_case_sensitive() {
+        // Surrounding whitespace is trimmed, but matching is exact/lowercase:
+        // "Line" is not accepted.
+        assert_eq!(parse_unit(" line ").unwrap(), Unit::Line);
+        assert!(parse_unit("Line").is_err());
+    }
+
+    #[test]
+    fn parse_args_read_and_by_combined_order_independent() {
+        // `--read` then `--by line` sets both regardless of ordering.
+        let Action::Run(opts) = parse_args(["--read", "--by", "line"]).unwrap() else {
+            panic!("expected Run");
+        };
+        assert!(opts.read);
+        assert_eq!(opts.by, Unit::Line);
     }
 
     #[test]

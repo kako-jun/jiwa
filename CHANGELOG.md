@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Interactive reader (sound-novel) mode (`--read`): reveal a piped novel
+  one segment at a time, pausing for Enter between segments — the terminal
+  equivalent of a visual-novel "click to continue". Phase 1, dependency-free
+  (no raw mode).
+  - `--by <UNIT>` chooses the segment unit: `sentence` (default, splits on
+    Japanese 。！？ + trailing close brackets and on English `. ! ?`
+    followed by whitespace/end, leaving decimals like `3.14` intact),
+    `paragraph` (blank-line delimited), or `line`.
+  - Keypresses are read from the controlling terminal (`/dev/tty`) because
+    stdin holds the novel — the `less` / `fzf` / `git add -p` pattern.
+    Enter advances; `q` or Ctrl-D (EOF) ends the session.
+  - The waiting prompt is erased on advance, so scrollback keeps only the
+    novel text. Each segment uses the existing reveal flags
+    (`--fade` / `--stagger` / `--from` / `--to` / `--fps`).
+  - Pipe-safe: non-TTY stdout (or an unopenable `/dev/tty`) falls back to
+    verbatim passthrough. The library crate stays unchanged.
+
 ## [0.2.0] — 2026-05-29
 
 ### Added

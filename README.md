@@ -99,6 +99,37 @@ When stdout is not a terminal (or no animation flag is given) the input is
 passed through verbatim, so `jiwa ... | other` and `jiwa ... > file` stay
 free of cursor-control noise. Run `jiwa --help` for the full flag list.
 
+### Reader mode (sound novel)
+
+`--read` turns a piped novel into an interactive reader: each segment
+reveals, then `jiwa` waits for you to press **Enter** before moving on —
+the terminal version of a visual-novel "click to continue".
+
+```sh
+# one sentence at a time (the default), with a gentle typewriter
+cat novel.txt | jiwa --read --stagger 40ms
+
+# one paragraph per Enter (paragraphs are split on blank lines — a line
+# that is just a newline; a line with only spaces does not start a new one)
+cat novel.txt | jiwa --read --by paragraph
+
+# one line per Enter
+cat lyrics.txt | jiwa --read --by line --fade 300ms
+```
+
+`--by` chooses the segment unit: `sentence` (default), `paragraph`, or
+`line`. The reveal flags (`--fade` / `--stagger` / `--from` / `--to` /
+`--fps`) apply to each segment.
+
+Because the novel occupies stdin, keypresses are read from the
+controlling terminal (`/dev/tty`) — the same approach `less`, `fzf`, and
+`git add -p` use. Press Enter to advance; `q` or Ctrl-D ends the session.
+The waiting prompt is erased once you advance, so the scrollback keeps
+only the novel text. When stdout is not a TTY (or `/dev/tty` cannot be
+opened), reader mode falls back to verbatim passthrough so pipes and
+files stay clean. This is **Phase 1**: Enter-delimited and dependency-free
+(no raw mode); single-keypress advance and reveal-skipping are future work.
+
 ### Long lines and interrupts
 
 While animating, `jiwa` redraws each frame in place with line-wrap
