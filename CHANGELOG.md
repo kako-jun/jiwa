@@ -6,6 +6,24 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Per-grapheme sound (`--sound <PATH|URL>`): plays a short sound
+  (best-effort) each time a reveal frame brings new non-whitespace
+  graphemes into view, giving the typewriter a voice (typewriter clack,
+  Dragon-Quest-style text beep, etc.). Works in reader mode (`--read`) too.
+  - The `jiwa` binary stays **zero-dependency**: jiwa never decodes audio.
+    The sound *file* is user-supplied; playback shells out to an OS player
+    (`ffplay` / `mpv` / `aplay` / `pw-cat`, or macOS `afplay`), and URLs are
+    fetched once via `curl` (or `wget`). No audio or HTTP crate is added;
+    the library crate is untouched.
+  - File/network I/O happens **once at load**: bytes are held in memory and
+    replayed (graphemes never re-read or re-download). A URL is cached under
+    `$XDG_RUNTIME_DIR`/`$TMPDIR`/`/tmp` keyed by a SipHash of the URL and
+    reused if present; cleanup is left to the OS (jiwa holds no state and
+    leaves no resident player — each play spawns a fresh process and never
+    waits, so the reveal is never blocked).
+  - Fully **best-effort**: a missing file, missing fetcher, missing player,
+    or failed playback is silent (at most one quiet stderr note at startup);
+    the reveal always runs. WAV is recommended (plays from stdin cleanly).
 - Interactive reader (sound-novel) mode (`--read`): reveal a piped novel
   one segment at a time, pausing for Enter between segments — the terminal
   equivalent of a visual-novel "click to continue". Phase 1, dependency-free

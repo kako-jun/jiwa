@@ -12,6 +12,7 @@
 mod cli;
 mod reader;
 mod render;
+mod sound;
 
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
@@ -62,7 +63,11 @@ fn main() -> ExitCode {
     if opts.read {
         if is_tty {
             if let Ok(tty) = File::open("/dev/tty") {
-                run_reader(&input, &opts, tty);
+                // Load the sound only on the path that actually reveals
+                // (after the TTY/`/dev/tty` checks) so passthrough never
+                // pays the file/network I/O. Load is once, here.
+                let sound = opts.sound.as_deref().and_then(sound::load);
+                run_reader(&input, &opts, tty, sound.as_ref());
                 return ExitCode::SUCCESS;
             }
         }
@@ -77,11 +82,15 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // Load the sound source once, only now that we know we will animate
+    // (passthrough above never reaches here, so it never triggers I/O).
+    let sound = opts.sound.as_deref().and_then(sound::load);
+
     let mut out = io::stdout().lock();
     let _ = out.write_all(ENTER);
     let _ = out.flush();
     let _guard = TermGuard;
-    reveal_segment(&mut out, &input, &opts);
+    reveal_segment(&mut out, &input, &opts, sound.as_ref());
     ExitCode::SUCCESS
 }
 
@@ -163,7 +172,12 @@ fn final_render_sequence(prev_rows: usize, final_frame: &str) -> Vec<u8> {
 /// [`RESTORE`]. This differs from the old `animate_reveal`, which short-
 /// circuited to passthrough *before* [`ENTER`]. The difference is harmless:
 /// the escapes are balanced and the terminal is restored on guard drop.
-fn reveal_segment<W: Write>(out: &mut W, input: &str, opts: &CliOpts) {
+fn reveal_segment<W: Write>(
+    out: &mut W,
+    input: &str,
+    opts: &CliOpts,
+    sound: Option<&sound::Sound>,
+) {
     let tokens = tokenize(input);
     let plain = plain_text(&tokens);
 
@@ -193,6 +207,11 @@ fn reveal_segment<W: Write>(out: &mut W, input: &str, opts: &CliOpts) {
     // (e.g. 60 fps -> 16.667 ms, not the 16 ms an integer division gives).
     let frame_delay = Duration::from_secs_f64(1.0 / f64::from(opts.fps));
     let mut prev_rows = 0usize;
+    // Track how many graphemes were visible last frame so we can detect the
+    // increment newly revealed this frame and, if it includes any non-blank
+    // grapheme, voice it once (one play per frame — keeps fast reveals from
+    // spawning a player storm and never sounds on whitespace-only steps).
+    let mut prev_visible = 0usize;
 
     // The loop yields its final snapshot, making that fully-revealed frame
     // the single source of truth for the confirmed render's colors. (The
@@ -204,6 +223,22 @@ fn reveal_segment<W: Write>(out: &mut W, input: &str, opts: &CliOpts) {
 
         let snap = handle.snapshot(now);
         let visible = snap.len();
+
+        // Voice newly revealed text. If this frame brought more graphemes
+        // into view than the last, and any of those new graphemes is not
+        // pure whitespace, play the sound once (best-effort, non-blocking).
+        if let Some(s) = sound {
+            if visible > prev_visible {
+                let has_printable = snap[prev_visible..visible]
+                    .iter()
+                    .any(|g| !g.text.chars().all(char::is_whitespace));
+                if has_printable {
+                    s.play();
+                }
+            }
+        }
+        prev_visible = visible;
+
         let colors: Vec<Rgb> = snap.iter().map(|g| g.color).collect();
 
         let frame = render_frame(&tokens.tokens, visible, &colors, tokens.has_input_color);
@@ -236,7 +271,7 @@ fn reveal_segment<W: Write>(out: &mut W, input: &str, opts: &CliOpts) {
 /// the reader advances, so scrollback keeps only the novel text. A single
 /// [`TermGuard`] covers every segment so the cursor/wrap state is restored
 /// no matter how the loop exits.
-fn run_reader(input: &str, opts: &CliOpts, tty: File) {
+fn run_reader(input: &str, opts: &CliOpts, tty: File, sound: Option<&sound::Sound>) {
     let segments = reader::segment(input, opts.by);
     if segments.is_empty() {
         // Nothing readable: stay clean, behave like passthrough.
@@ -253,7 +288,7 @@ fn run_reader(input: &str, opts: &CliOpts, tty: File) {
     let total = segments.len();
 
     for (i, seg) in segments.iter().enumerate() {
-        reveal_segment(&mut out, seg, opts);
+        reveal_segment(&mut out, seg, opts, sound);
 
         // The last segment is not followed by a wait.
         if i + 1 == total {
