@@ -63,11 +63,11 @@ fn main() -> ExitCode {
     if opts.read {
         if is_tty {
             if let Ok(tty) = File::open("/dev/tty") {
-                // Load the sound only on the path that actually reveals
-                // (after the TTY/`/dev/tty` checks) so passthrough never
-                // pays the file/network I/O. Load is once, here.
-                let sound = opts.sound.as_deref().and_then(sound::load);
-                run_reader(&input, &opts, tty, sound.as_ref());
+                // Pass the sound *spec* (not a loaded `Sound`): `run_reader`
+                // loads it only after confirming there are non-empty
+                // segments to reveal, so an empty/whitespace-only novel that
+                // falls back to passthrough never pays the file/network I/O.
+                run_reader(&input, &opts, tty, opts.sound.as_deref());
                 return ExitCode::SUCCESS;
             }
         }
@@ -289,13 +289,19 @@ fn reveal_segment<W: Write>(
 /// the reader advances, so scrollback keeps only the novel text. A single
 /// [`TermGuard`] covers every segment so the cursor/wrap state is restored
 /// no matter how the loop exits.
-fn run_reader(input: &str, opts: &CliOpts, tty: File, sound: Option<&sound::Sound>) {
+fn run_reader(input: &str, opts: &CliOpts, tty: File, sound_spec: Option<&str>) {
     let segments = reader::segment(input, opts.by);
     if segments.is_empty() {
-        // Nothing readable: stay clean, behave like passthrough.
+        // Nothing readable: stay clean, behave like passthrough. We have not
+        // loaded the sound yet, so this passthrough triggers no I/O.
         passthrough(input);
         return;
     }
+
+    // Only now, with at least one segment to reveal, load the sound (once).
+    // Loading here rather than in `main` keeps the empty-input passthrough
+    // above free of any file/network I/O or stderr note.
+    let sound = sound_spec.and_then(sound::load);
 
     let mut out = io::stdout().lock();
     let _ = out.write_all(ENTER);
@@ -306,7 +312,7 @@ fn run_reader(input: &str, opts: &CliOpts, tty: File, sound: Option<&sound::Soun
     let total = segments.len();
 
     for (i, seg) in segments.iter().enumerate() {
-        reveal_segment(&mut out, seg, opts, sound);
+        reveal_segment(&mut out, seg, opts, sound.as_ref());
 
         // The last segment is not followed by a wait.
         if i + 1 == total {
