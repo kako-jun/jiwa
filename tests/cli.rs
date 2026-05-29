@@ -146,6 +146,28 @@ fn missing_value_exits_two() {
 }
 
 #[test]
+fn escape_only_input_with_animation_passes_through() {
+    // Input with no printable graphemes (escape sequences only) must not be
+    // swallowed even when animation is requested: it falls back to verbatim
+    // pass-through (here over a non-TTY pipe, with a trailing newline added).
+    let input = "\x1b[31m\x1b[0m".as_bytes();
+    let out = run(&["--fade", "200ms"], input);
+    assert_eq!(out.status.code(), Some(0));
+    let mut expected = input.to_vec();
+    expected.push(b'\n');
+    assert_eq!(out.stdout, expected);
+}
+
+#[test]
+fn equals_form_flags_accepted() {
+    // `--flag=value` is accepted by the real binary (exit 0, clean pipe).
+    let out = run(&["--fade=200ms", "--stagger=30ms"], b"streamed");
+    assert_eq!(out.status.code(), Some(0));
+    assert_no_ansi_noise(&out.stdout);
+    assert_eq!(out.stdout, b"streamed\n");
+}
+
+#[test]
 fn pipe_into_pipe_stays_clean() {
     // Even with animation requested, a non-TTY stdout forces pass-through:
     // verbatim body, no control codes.
