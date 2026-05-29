@@ -88,6 +88,9 @@ echo "Hello" | jiwa --stagger 50ms
 # both, with custom colors
 echo "Hello" | jiwa --fade 200ms --stagger 50ms --from "#444" --to "#fff"
 
+# value flags also take the `=`-joined form
+echo "Hello" | jiwa --fade=200ms --stagger=50ms
+
 # pass-through: existing ANSI color is preserved, reveal is timing only
 cat story.txt | lolcat | jiwa --stagger 30ms
 ```
@@ -95,6 +98,20 @@ cat story.txt | lolcat | jiwa --stagger 30ms
 When stdout is not a terminal (or no animation flag is given) the input is
 passed through verbatim, so `jiwa ... | other` and `jiwa ... > file` stay
 free of cursor-control noise. Run `jiwa --help` for the full flag list.
+
+### Long lines and interrupts
+
+While animating, `jiwa` redraws each frame in place with line-wrap
+disabled, so lines wider than the terminal are clipped during the
+animation; the **final confirmed render re-enables line-wrap** before
+drawing, so the permanent output in your scrollback wraps long lines
+normally. This two-stage approach keeps the in-place animation from
+scrolling the terminal while still leaving correct, wrapped text behind.
+
+`jiwa` is intentionally dependency-free and installs **no signal
+handler**. If you interrupt an animation with Ctrl-C, the terminal can be
+left with the cursor hidden and line-wrap turned off. Run `reset` to
+restore it.
 
 ## Mapping to your renderer
 

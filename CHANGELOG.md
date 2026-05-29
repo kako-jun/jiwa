@@ -16,6 +16,12 @@ All notable changes to this project will be documented in this file.
     using the reveal only for timing.
   - Reuses the library `RevealHandle` engine; the library stays
     renderer-agnostic and dependency-free.
+  - Value-taking flags accept both `--fade 200ms` and `--fade=200ms`.
+  - While animating, line-wrap is disabled and frames redraw in place;
+    the final confirmed render re-enables wrap so long lines wrap in
+    scrollback. No signal handler is installed (dependency-free), so an
+    interrupted animation may leave the cursor hidden / wrap off until
+    `reset`.
 
 ## [0.1.0] — 2026-05-17
 
