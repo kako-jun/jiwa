@@ -1,6 +1,6 @@
 [package]
 name = "jiwa"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["kako-jun"]
 description = "Terminal text reveal animations — typewriter + per-grapheme fade-in + pulse. Renderer-agnostic: returns plain RGB so the caller maps to crossterm, ratatui, or its own ANSI writer."
