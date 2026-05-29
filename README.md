@@ -109,7 +109,8 @@ the terminal version of a visual-novel "click to continue".
 # one sentence at a time (the default), with a gentle typewriter
 cat novel.txt | jiwa --read --stagger 40ms
 
-# one paragraph (blank-line delimited) per Enter
+# one paragraph per Enter (paragraphs are split on blank lines — a line
+# that is just a newline; a line with only spaces does not start a new one)
 cat novel.txt | jiwa --read --by paragraph
 
 # one line per Enter
